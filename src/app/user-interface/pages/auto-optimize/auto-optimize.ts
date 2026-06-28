@@ -72,7 +72,8 @@ export class AutoOptimizePage extends HTMLElement {
         const monsterName = target
             ? Global.game.monsters.getObjectByID(target.monsterId)?.name ?? target.monsterId
             : 'None selected';
-        const unit = plot.isTime ? ` per ${Global.stores.plotter.timeShorthand}` : '';
+        // plot.text already ends with "per" for time metrics (e.g. "XP per"), so only append the unit.
+        const unit = plot.isTime ? ` ${Global.stores.plotter.timeShorthand}` : '';
         const direction = this._scorer.isMaximize() ? 'maximize' : 'minimize';
         const supported = isSupportedObjective();
 
@@ -179,13 +180,31 @@ export class AutoOptimizePage extends HTMLElement {
     private _renderProgress(progress: OptimizeProgress) {
         Global.stores.optimizer.set({ progress });
         const best = Number.isFinite(progress.bestMetric) ? this._format(progress.bestMetric) : '—';
+        // The slot counter is only meaningful while searching; finalize/done emit slotIndex == slotCount.
+        const slotPart =
+            progress.phase === 'searching'
+                ? `slot ${Math.min(progress.slotIndex + 1, progress.slotCount)}/${progress.slotCount} · `
+                : '';
         this._progress.textContent =
             `${this._phaseLabel(progress.phase)} · pass ${progress.pass} · ` +
-            `slot ${progress.slotIndex + 1}/${progress.slotCount} · ` +
+            slotPart +
             `evals ${progress.evaluations} · best ${best}`;
     }
 
     private _renderResult(result: OptimizeResult) {
+        // If even the baseline couldn't be scored, every simulation failed — e.g. the character
+        // can't defeat the target (a realm/setup mismatch), or the metric is unavailable for it.
+        if (!Number.isFinite(result.baseline.metric)) {
+            this._status.textContent = 'Could not optimize.';
+            this._results.innerHTML =
+                `<div class="mcs-auto-optimize-warn">Every simulation failed for this target. The character ` +
+                `couldn't defeat it (often a realm/setup mismatch), or the selected metric isn't available for it. ` +
+                `Try a target the character can actually kill, or a different objective/metric.</div>` +
+                `<div class="text-muted">${result.evaluations} simulations run.</div>`;
+            this._apply.disabled = true;
+            return;
+        }
+
         this._status.textContent =
             result.status === 'cancelled' ? 'Cancelled — showing the best found so far.' : 'Done.';
 
