@@ -8,6 +8,7 @@ import { SettingsController, Settings } from 'src/app/settings-controller';
 import { SimulationData } from 'src/app/simulation';
 import { PlotKey } from 'src/app/stores/plotter.store';
 import { SimulateResponse } from 'src/shared/transport/type/simulate';
+import { pruneDominated, StatVector } from 'src/app/optimizer/prune';
 import {
     CandidateProvider,
     EquipmentLoadout,
@@ -120,24 +121,62 @@ export class GameCandidateProvider implements CandidateProvider {
             return [];
         }
 
-        return Global.game.items.equipment
-            .filter(item => {
-                if (item.id === EMPTY_ITEM || item.id === DEBUG_ITEM || item.golbinRaidExclusive) {
-                    return false;
-                }
-                if (!item.validSlots.some(valid => valid.id === slotId)) {
-                    return false;
-                }
-                // Requirements (level/skill/etc.). Modded items skip the check, mirroring equipItem.
-                if (!item.isModded && !Global.game.checkRequirements(item.equipRequirements, false)) {
-                    return false;
-                }
-                if (this.ownedOnly && !this.isOwned(item.id)) {
-                    return false;
-                }
-                return true;
-            })
-            .map(item => item.id);
+        const items = Global.game.items.equipment.filter(item => {
+            if (item.id === EMPTY_ITEM || item.id === DEBUG_ITEM || item.golbinRaidExclusive) {
+                return false;
+            }
+            if (!item.validSlots.some(valid => valid.id === slotId)) {
+                return false;
+            }
+            // Requirements (level/skill/etc.). Modded items skip the check, mirroring equipItem.
+            if (!item.isModded && !Global.game.checkRequirements(item.equipRequirements, false)) {
+                return false;
+            }
+            if (this.ownedOnly && !this.isOwned(item.id)) {
+                return false;
+            }
+            return true;
+        });
+
+        // Prune dominated candidates to shrink the search. Items with special effects (modifiers,
+        // special attacks, set/combat effects) aren't captured by raw equipmentStats, so we NEVER
+        // prune those — only stat-pure items, and only on the full Pareto frontier across ALL their
+        // stats (dropped only if another item is >= on every stat and > on at least one), which can
+        // never drop a genuinely-better item.
+        const special: string[] = [];
+        const plain: StatVector[] = [];
+        for (const item of items) {
+            if (this.hasSpecialEffect(item)) {
+                special.push(item.id);
+            } else {
+                plain.push({ id: item.id, stats: this.statVector(item) });
+            }
+        }
+        const keys = [...new Set(plain.flatMap(p => Object.keys(p.stats)))];
+        return [...special, ...pruneDominated(plain, keys).map(v => v.id)];
+    }
+
+    /** An item whose value isn't fully captured by raw equipmentStats must not be pruned. */
+    private hasSpecialEffect(item: any): boolean {
+        const nonEmpty = (v: any) =>
+            v != null && (Array.isArray(v) ? v.length > 0 : typeof v === 'object' ? Object.keys(v).length > 0 : !!v);
+        return (
+            nonEmpty(item.modifiers) ||
+            nonEmpty(item.enemyModifiers) ||
+            nonEmpty(item.conditionalModifiers) ||
+            nonEmpty(item.specialAttacks) ||
+            nonEmpty(item.combatEffects)
+        );
+    }
+
+    /** Fold an item's equipmentStats into a flat {statKey -> value} vector (damage-type aware). */
+    private statVector(item: any): Record<string, number> {
+        const stats: Record<string, number> = {};
+        for (const stat of item.equipmentStats ?? []) {
+            const key = stat.damageType ? `${stat.key}:${stat.damageType.id}` : stat.key;
+            stats[key] = (stats[key] ?? 0) + stat.value;
+        }
+        return stats;
     }
 
     /** Owned = ever found, per the live character (items are distinct instances across the two games). */
