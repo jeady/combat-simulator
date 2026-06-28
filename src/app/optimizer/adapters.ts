@@ -77,7 +77,9 @@ export class GameScorer implements Scorer {
             response = await Global.simulation.simulator.simulate({
                 saveString,
                 monsterId: target.monsterId,
-                entityId: target.entityId ?? '',
+                // Must be undefined (not '') for a plain monster — the worker resolves a combat
+                // area from a non-undefined entityId and throws on '', failing every sim.
+                entityId: target.entityId as string,
                 trials,
                 maxTicks: ticks
             });
