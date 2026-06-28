@@ -17,3 +17,4 @@ Extension/build
 node_modules
 build
 .output
+tools/headless-sim/.cache
