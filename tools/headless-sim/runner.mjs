@@ -77,6 +77,7 @@ const harness = await readFile(join(CACHE, 'harness.js'), 'utf8');
 const fixups = `
 ;/* === fixups === */
 loadedLangJson = {};
+combatMenus = { eventMenu: { setButtonCallbacks: () => {} } };
 (function(){
   let __game;
   Object.defineProperty(globalThis, 'game', { configurable: true, get(){ return __game; }, set(v){ __game = v; game = v; } });
@@ -111,15 +112,41 @@ console.log('  monsters:', game.monsters.size);
 console.log('  Cow exists:', !!game.monsters.getObjectByID('melvorD:Cow'));
 console.log('\nHEADLESS BOOT OK');
 
-// WIP: a fresh SimGame needs a properly-initialized character before it can be encoded into
-// a save string. The app decodes a live save + resetToBlankState() first; the next harness
-// step is to set up a controlled character (levels + gear) so generateSaveStringSimple works.
-console.log('\nNext step: configure a character, then simulate. Attempting...');
-try {
-    const saveString = game.generateSaveStringSimple();
-    const result = await globalThis.__harness.simulate(saveString, 'melvorD:Cow', undefined, 50, 1000);
-    console.log('  simSuccess:', result.simSuccess, '| killTimeS:', result.killTimeS, '| xpPerSecondMelvor:', result.xpPerSecondMelvor);
-    console.log('\nHEADLESS SIMULATION RAN');
-} catch (e) {
-    console.log('  (sim step WIP) needs character init:', e.message);
+console.log('\nConfiguring a test character (mirrors save.js new-character init)...');
+const player = game.combat.player;
+game.currentGamemode = game.gamemodes.getObjectByID('melvorD:Standard') || game.currentGamemode;
+player.hitpoints = 10 * (game.currentGamemode?.hitpointMultiplier ?? 1);
+player.setDefaultEquipmentSets();
+player.setDefaultAttackStyles();
+player.setDefaultSpells();
+if (game.golbinRaid?.player) {
+    game.golbinRaid.player.setDefaultEquipmentSets();
+    game.golbinRaid.player.setDefaultAttackStyles();
+    game.golbinRaid.player.setDefaultSpells();
 }
+// Pre-init the level Maps: resetToBlankState's internal changeEquipmentSet computes stats
+// (reading skillLevel) before it sets skillLevel — fine in the app (decoded first), not on a
+// fresh player. (mirrors sim-player.ts:826)
+player.skillLevel = new Map(game.skills.allObjects.map(s => [s.id, 1]));
+player.skillLevel.set(game.hitpoints.id, 10);
+player.skillAbyssalLevel = new Map(game.skills.allObjects.map(s => [s.id, 0]));
+game.resetToBlankState();
+for (const id of ['Attack', 'Strength', 'Defence', 'Hitpoints', 'Ranged', 'Magic', 'Prayer', 'Slayer']) {
+    player.skillLevel.set(`melvorD:${id}`, 99);
+}
+const weapon =
+    game.items.equipment.getObjectByID('melvorD:Black_2H_Sword') ||
+    game.items.equipment.getObjectByID('melvorD:Bronze_2H_Sword') ||
+    game.items.equipment.getObjectByID('melvorD:Bronze_Sword');
+if (weapon) {
+    player.equipItem(weapon, 0, weapon.validSlots[0], 1, true);
+    console.log('  equipped:', weapon.id);
+}
+
+console.log('Running a real simulation vs Cow...');
+const saveString = game.generateSaveStringSimple();
+const result = await globalThis.__harness.simulate(saveString, 'melvorD:Cow', undefined, 100, 1000);
+console.log('  simSuccess:', result.simSuccess, '| reason:', result.reason ?? '-');
+console.log('  killTimeS:', result.killTimeS, '| killsPerSecond:', result.killsPerSecond);
+console.log('  xpPerSecondMelvor:', result.xpPerSecondMelvor, '| deathRate:', result.deathRate);
+console.log('\nHEADLESS SIMULATION RAN');
