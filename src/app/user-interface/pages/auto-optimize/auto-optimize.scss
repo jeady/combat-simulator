@@ -1,0 +1,47 @@
+.mcs-auto-optimize-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 0.5rem 1rem 1rem;
+}
+
+.mcs-auto-optimize-objective {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.mcs-auto-optimize-warn {
+    color: #e6a23c;
+}
+
+.mcs-auto-optimize-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.mcs-auto-optimize-label {
+    margin: 0;
+}
+
+.mcs-auto-optimize-input {
+    width: 6rem;
+}
+
+.mcs-auto-optimize-status {
+    font-weight: 600;
+}
+
+.mcs-auto-optimize-progress {
+    font-family: monospace;
+    opacity: 0.85;
+}
+
+.mcs-auto-optimize-results {
+    ul {
+        margin: 0.25rem 0 0;
+        padding-left: 1.25rem;
+    }
+}

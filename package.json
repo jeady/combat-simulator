@@ -5,7 +5,9 @@
     "scripts": {
         "zip": "node --import=tsimp/import tools/zip.mts",
         "build": "webpack && npm run zip",
-        "build:prod": "webpack --mode production && npm run zip"
+        "build:prod": "webpack --mode production && npm run zip",
+        "test": "vitest run",
+        "test:watch": "vitest"
     },
     "license": "GPL-3.0",
     "bugs": {
@@ -37,6 +39,7 @@
         "ts-node": "10.9.2",
         "tsimp": "2.0.10",
         "typescript": "5.3.3",
+        "vitest": "2.1.9",
         "webpack": "5.89.0",
         "webpack-cli": "5.1.4"
     }

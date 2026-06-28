@@ -1,0 +1,30 @@
+<template id="mcs-auto-optimize-page-template">
+    <mcs-page-title
+        page-title="Auto-Optimize"
+        description="Search your owned gear for the best loadout against the selected target. The objective is whatever plot metric is selected on the Simulate page; loadouts that don't reliably survive are rejected."
+    ></mcs-page-title>
+
+    <div class="mcs-auto-optimize-container">
+        <div id="mcs-auto-optimize-objective" class="mcs-auto-optimize-objective"></div>
+
+        <div class="mcs-auto-optimize-controls">
+            <label class="mcs-auto-optimize-label" for="mcs-auto-optimize-search-trials">Search trials</label>
+            <input
+                id="mcs-auto-optimize-search-trials"
+                class="mcs-auto-optimize-input"
+                type="number"
+                min="10"
+                step="10"
+                value="200"
+            />
+            <button id="mcs-auto-optimize-run" class="mcs-button mcs-auto-optimize-run">Run Optimization</button>
+            <button id="mcs-auto-optimize-apply" class="mcs-button mcs-auto-optimize-apply" disabled>
+                Apply Best Loadout
+            </button>
+        </div>
+
+        <div id="mcs-auto-optimize-status" class="mcs-auto-optimize-status"></div>
+        <div id="mcs-auto-optimize-progress" class="mcs-auto-optimize-progress"></div>
+        <div id="mcs-auto-optimize-results" class="mcs-auto-optimize-results"></div>
+    </div>
+</template>
