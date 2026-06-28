@@ -65,8 +65,10 @@ drop **dominated** options (strictly worse in all relevant stats than another).
 - **Later:** genetic algorithm / simulated annealing to handle **set bonuses and
   special-weapon synergies**, which trap naive greedy search.
 - Enforces hard constraints (survive; mutually-exclusive choices; ammo/style/rune
-  consistency), caches evaluated loadouts, respects a time/evaluation budget, and uses
-  the mod's existing **worker pool** for parallelism.
+  consistency), caches evaluated loadouts, respects a time/evaluation budget, and runs
+  evaluations across a **worker pool we create**. ⚠️ The base mod has only **one
+  sequential worker** — there is no pool to reuse (see §9.5). Real parallelism requires
+  instantiating multiple `Worker`s ourselves.
 
 ### Orchestration
 
@@ -87,12 +89,10 @@ UI                   Auto-Optimize panel (target, objective, item-pool toggle, c
 
 ## 6. Phased roadmap
 
-- **P0 — Spike / de-risk.** Build the fork (done), pin game v1.3.1, establish the Chrome
-  dev-load loop, and map the code seams:
-  - the `evaluate(setup)` entry point (how a setup is dispatched to the workers),
-  - the setup/loadout data shape (equipped item, agility course, summon, …),
-  - where **owned items** come from (live bank/equipment),
-  - how the selected **metric + death rate** come back out.
+- **P0 — Spike / de-risk. ✅ COMPLETE — see §9 for the verified contract.** Built the fork,
+  established the Firefox dev-load loop, and mapped the code seams (evaluate entry point,
+  loadout data shape, owned-items source, metric + death-rate readout). Still to do within
+  P0: pin/confirm game v1.3.1 in the live client.
 - **P1 — MVP.** Gear-only, owned items, full-sim scoring, single target, coordinate-ascent
   search. Proves the loop end-to-end.
 - **P2 — Make it fast.** Analytic surrogate + candidate pruning + worker parallelism + caching.
@@ -103,12 +103,17 @@ UI                   Auto-Optimize panel (target, objective, item-pool toggle, c
 
 ## 7. Open questions / risks
 
-- **Browser dev-load loop:** exact steps to side-load a local build into the Chrome
-  Melvor client via the Mod Manager (verify in P0; drives iteration speed).
+- ~~**Browser dev-load loop**~~ — ✅ resolved, see §10. Firefox uses Creator Toolkit
+  "Modfile mode" (point it at our `build/*.zip`); no localhost server needed.
+- ~~**Worker pool**~~ — ✅ resolved: there is no pool; single sequential worker (§9.5).
+  We must instantiate our own `Worker`s for parallelism.
 - **Analytic surrogate fidelity:** how closely Tier-1 estimates track Tier-2 sim across
   styles/effects; may need per-metric calibration.
 - **Cartography modeling:** how the sim represents cartography combat bonuses (free choice
   vs fixed by surveyed map) — confirm before treating it as a search dimension.
+- **Metric store-state coupling:** GP/drop/pet/mark metrics aren't pure functions of one
+  sim — they require `Drops.update()` and correct `plotter` store state (§9.4). The "skill"
+  selector only affects Pet/Mark metrics; XP keys are driven by **realm**, not skill.
 - **Game-version drift:** upstream is unmaintained; a future game update may break the base
   mod. We stay pinned to v1.3.1 for now.
 
@@ -117,3 +122,72 @@ UI                   Auto-Optimize panel (target, objective, item-pool toggle, c
 - Repo: `jeady/combat-simulator` (`origin`), `mythridium/combat-simulator` (`upstream`).
 - Build: `npm install` then `npm run build` → `build/*.zip` (the loadable mod).
 - Toolchain verified: Node 24.x, npm 11.x, git, gh.
+- Branch: `auto-optimize` (this doc lives here).
+- Play/test client: **Firefox** (keeps the main Chrome idle session undisturbed).
+
+## 9. P0 findings — verified integration contract
+
+All references are `file:line` in this repo, confirmed by reading source. Two key globals:
+`Global.game` = `SimGame` (the **editable simulated** game/player we mutate);
+`Global.melvor` = the **real live** Melvor `Game` (read current character from here).
+Items in the two `Game`s are distinct instances — **match by `.id`**.
+
+**9.1 Core scorer seam (evaluate one loadout vs one target).**
+Mutate `Global.game.combat.player` / `SimGame` managers → `Global.game.generateSaveStringSimple()`
+(`src/shared/simulator/sim-game.ts:483`) → `await Global.simulation.simulator.simulate({ saveString,
+monsterId, entityId, trials, maxTicks })` (`src/app/worker/simulator.ts:37`) → returns a
+`SimulationResult`. This bypasses the UI queue (`Simulation.startQueue()`, `src/app/simulation.ts:844`)
+and is the single function the search loop should wrap. Message protocol:
+`MessageAction.{Init,Simulate,Cancel}` over a `Transport` that multiplexes by message `id`
+(`src/shared/transport/`); worker handler at `src/worker/main.ts:21` → `Simulator.simulateMonster`
+(`src/worker/simulator.ts:5`).
+
+**9.2 Loadout representation.** Two forms:
+- *Runtime:* `SimGame`/`SimPlayer` (`src/shared/simulator/sim-{game,player}.ts`) — gear, styles,
+  `spellSelection.{attack,curse,aurora}`, prayers, food, potion, `skillLevel` map, agility/astrology/
+  cartography on managers. Config UI pages write directly into `Global.game`.
+- *Serializable (use as candidate + cache key):* `interface Settings`
+  (`src/app/settings-controller.ts:35`). `SettingsController.export()`/`import()` convert to/from
+  the live `SimGame`; `importFromEquipmentSet(i)` (`:92`) builds one from the live player.
+
+**9.3 Item pools.**
+- *All items:* `Global.game.items.equipment.filter(i => i.validSlots.some(s => s.id === slotId))`
+  (canonical picker pattern, `…/equipment-slot/equipment-slot.ts:146`).
+- *Owned only:* same, filtered by `Global.melvor.stats.itemFindCount(item) > 0` (ever-found) or
+  `Global.melvor.bank.getQty(item) > 0` (in bank now), with the id round-trip. **Note:** the sim
+  stubs the bank to "infinite/has-everything" (`sim-game.ts:53-56`), so ownership is *not* enforced
+  by the engine — we filter the candidate list ourselves.
+
+**9.4 Objective function (skill + plot-type → number).**
+`score = Global.simulation.getValue(true, result, key, scale)` (`src/app/simulation.ts:317`), where
+`key`/`scale` come from `Global.stores.plotter.plotType` (`src/app/stores/plotter.store.ts`, `enum
+PlotKey`). For `isRealmed` plot types the key gets a realm suffix (e.g. `xpPerSecond` →
+`xpPerSecondMelvor`). **Survival constraint:** read `result.deathRate` directly. **Caveat:** GP/drop/
+pet/mark fields return `NaN` from the worker and are filled by `Drops.update()` (`src/app/drops.ts:26`)
+using `plotter` store state — so for those metrics set the store + call `Drops.update()` before scoring.
+
+**9.5 Parallelism — single sequential worker (no pool).**
+`Simulation` → one `Simulator` → one `WebWorker` → one `new Worker(...)` (`src/app/worker/web-worker.ts:7`);
+jobs drained sequentially by `startQueue()`. `Transport` keys responses by id, so dispatch bookkeeping
+across N workers is easy — but throughput is bounded by worker **count**, which is 1 today. For batching
+candidates we instantiate our own `Worker`s (each needs its own `MessageAction.Init` handshake).
+
+## 10. Dev-load loop (Firefox) — verified
+
+Browser modding uses the **Creator Toolkit** (an official in-game mod). Browser supports **Modfile
+mode only** (point it at a built `.zip`); **Directory Link** folder hot-reload is **Steam-only**.
+**No localhost server is needed.** Requires the **Full version** + a mod.io login linked to your Melvor
+account (not the free demo).
+
+1. *One-time:* Mod Manager → Browse → search **"Creator Toolkit"** → Subscribe → reload game.
+2. Build: `npm run build` → `build/myth-combat-simulator-*.zip`.
+3. Open **Creator Toolkit** (Mod Manager tab / sidebar / asterisk shortcut) → add a **local mod
+   (Modfile)** → select our zip.
+4. *(Optional)* link the local mod to its mod.io profile (matching `namespace`) to override the
+   installed mod.io copy and enable persistent settings storage.
+5. Reload the game → our build loads (local mods load before mod.io mods).
+6. *Iterate:* edit → `npm run build` → re-select the new zip in the Toolkit → reload the tab
+   (hard-refresh Ctrl+Shift+R if a change doesn't appear).
+
+Source: [Creator Toolkit wiki](https://wiki.melvoridle.com/w/Mod_Creation/Creator_Toolkit),
+[Getting Started](https://wiki.melvoridle.com/w/Mod_Creation/Getting_Started).
