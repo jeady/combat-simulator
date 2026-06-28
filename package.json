@@ -7,7 +7,10 @@
         "build": "webpack && npm run zip",
         "build:prod": "webpack --mode production && npm run zip",
         "test": "vitest run",
-        "test:watch": "vitest"
+        "test:watch": "vitest",
+        "harness:download": "node tools/headless-sim/download.mjs",
+        "harness:build": "esbuild tools/headless-sim/harness-entry.ts --bundle --format=iife --platform=node --tsconfig=tsconfig.json --outfile=tools/headless-sim/.cache/harness.js",
+        "harness": "npm run harness:build && node tools/headless-sim/runner.mjs"
     },
     "license": "GPL-3.0",
     "bugs": {
@@ -28,6 +31,7 @@
         "copy-webpack-plugin": "12.0.1",
         "css-loader": "6.9.0",
         "dexie": "3.2.0",
+        "esbuild": "0.28.1",
         "melvor-types": "https://github.com/GamesByMalcsPtyLtd/Melvor-Typing-Project/tarball/8b96869",
         "sass": "1.69.7",
         "sass-loader": "14.0.0",
