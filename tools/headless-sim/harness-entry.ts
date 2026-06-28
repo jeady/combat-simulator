@@ -2,26 +2,113 @@
  * Headless harness entry — bundled by esbuild as a classic IIFE and evaluated in the SAME
  * scope as the (already-loaded) game scripts, so `SimGame extends Game` resolves Game from
  * the shared scope. It reuses the real worker boot (WorkerMock + Environment.init) and the
- * real Simulator, and exposes them on globalThis for the Node runner to drive.
+ * real Simulator, and drives the real optimizer against them — all without a browser.
  */
 import { Global as GlobalManager } from 'src/shared/global';
 import { Global } from 'src/worker/global';
 import { WorkerMock } from 'src/worker/context/mock';
 import { Environment } from 'src/worker/context/environment';
+import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
+import {
+    CandidateProvider,
+    EquipmentLoadout,
+    Evaluation,
+    LoadoutApplier,
+    OptimizeTarget,
+    Scorer,
+    SlotRef
+} from 'src/app/optimizer/types';
+
+const EMPTY = 'melvorD:Empty_Equipment';
+const g = () => (Global as any).game;
+
+/** Scores the currently-applied loadout by running one real simulation (objective: XP/hr). */
+class HarnessScorer implements Scorer {
+    public async evaluate(target: OptimizeTarget, trials: number, ticks: number): Promise<Evaluation> {
+        const saveString = g().generateSaveStringSimple();
+        const res: any = await (Global as any).simulator.simulateMonster(
+            saveString,
+            target.monsterId,
+            target.entityId,
+            trials,
+            ticks
+        );
+        if (!res || !res.simSuccess || Number.isNaN(res.xpPerSecondMelvor)) {
+            return { metric: NaN, deathRate: res?.deathRate ?? Infinity, success: false };
+        }
+        return { metric: res.xpPerSecondMelvor, deathRate: res.deathRate ?? 0, success: true };
+    }
+    public isMaximize() {
+        return true;
+    }
+}
+
+/** Mutates / snapshots the sim player's equipment (mirrors the app's GameLoadoutApplier). */
+class HarnessApplier implements LoadoutApplier {
+    public snapshot(): unknown {
+        return this.getCurrentLoadout();
+    }
+    public restore(snap: unknown): void {
+        this.applyLoadout(snap as EquipmentLoadout);
+    }
+    public slots(): SlotRef[] {
+        return g().equipmentSlots.allObjects.map((s: any) => ({ id: s.id }));
+    }
+    public getCurrentLoadout(): EquipmentLoadout {
+        const loadout: EquipmentLoadout = new Map();
+        const equipment = g().combat.player.equipment;
+        for (const slot of g().equipmentSlots.allObjects) {
+            const item = equipment.equippedItems[slot.id]?.item;
+            if (item && item.id !== EMPTY) {
+                loadout.set(slot.id, item.id);
+            }
+        }
+        return loadout;
+    }
+    public applyLoadout(loadout: EquipmentLoadout): void {
+        g().combat.player.equipment.unequipAll();
+        for (const [slotId, itemId] of loadout) {
+            this.equip(slotId, itemId);
+        }
+    }
+    public equip(slotId: string, itemId: string): void {
+        const item = g().items.equipment.getObjectByID(itemId);
+        const slot = g().equipmentSlots.getObjectByID(slotId);
+        if (!item || !slot || item.occupiesSlots.some((occupied: any) => occupied === slot)) {
+            return;
+        }
+        g().combat.player.equipItem(item, 0, slot, 1, true);
+    }
+}
+
+/** Per-slot candidate item ids, supplied by the harness test. */
+class HarnessCandidateProvider implements CandidateProvider {
+    constructor(private readonly bySlot: Record<string, string[]>) {}
+    public getCandidates(slotId: string): string[] {
+        return this.bySlot[slotId] ?? [];
+    }
+}
 
 (globalThis as any).__harness = {
     get global() {
         return Global;
     },
-    /** Runs the real worker init: WorkerMock + Environment.init (loads game data, builds SimGame). */
     async init(data: any) {
         GlobalManager.setWorker(Global);
         WorkerMock.init();
         await Environment.init(data);
         return true;
     },
-    /** One real simulation, via the real worker Simulator. */
     simulate(saveString: string, monsterId: string, entityId: string | undefined, trials: number, maxTicks: number) {
         return (Global as any).simulator.simulateMonster(saveString, monsterId, entityId, trials, maxTicks);
+    },
+    /** Run the real CoordinateAscentOptimizer against the live SimGame, headless. */
+    optimize(target: OptimizeTarget, candidatesBySlot: Record<string, string[]>, options: any) {
+        const optimizer = new CoordinateAscentOptimizer(
+            new HarnessScorer(),
+            new HarnessCandidateProvider(candidatesBySlot),
+            new HarnessApplier()
+        );
+        return optimizer.run(target, options);
     }
 };

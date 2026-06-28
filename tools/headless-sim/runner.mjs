@@ -134,19 +134,25 @@ game.resetToBlankState();
 for (const id of ['Attack', 'Strength', 'Defence', 'Hitpoints', 'Ranged', 'Magic', 'Prayer', 'Slayer']) {
     player.skillLevel.set(`melvorD:${id}`, 99);
 }
-const weapon =
-    game.items.equipment.getObjectByID('melvorD:Black_2H_Sword') ||
-    game.items.equipment.getObjectByID('melvorD:Bronze_2H_Sword') ||
-    game.items.equipment.getObjectByID('melvorD:Bronze_Sword');
-if (weapon) {
-    player.equipItem(weapon, 0, weapon.validSlots[0], 1, true);
-    console.log('  equipped:', weapon.id);
-}
+// Start with a deliberately suboptimal weapon so the optimizer has an improvement to find.
+const swords = ['melvorD:Bronze_2H_Sword', 'melvorD:Iron_2H_Sword', 'melvorD:Steel_2H_Sword', 'melvorD:Black_2H_Sword'];
+const start = game.items.equipment.getObjectByID(swords[0]);
+const weaponSlotId = start.validSlots[0].id;
+player.equipItem(start, 0, start.validSlots[0], 1, true);
+console.log('  starting weapon:', start.id, '| weapon slot:', weaponSlotId);
 
-console.log('Running a real simulation vs Cow...');
-const saveString = game.generateSaveStringSimple();
-const result = await globalThis.__harness.simulate(saveString, 'melvorD:Cow', undefined, 100, 1000);
-console.log('  simSuccess:', result.simSuccess, '| reason:', result.reason ?? '-');
-console.log('  killTimeS:', result.killTimeS, '| killsPerSecond:', result.killsPerSecond);
-console.log('  xpPerSecondMelvor:', result.xpPerSecondMelvor, '| deathRate:', result.deathRate);
-console.log('\nHEADLESS SIMULATION RAN');
+console.log('\nRunning the REAL optimizer (weapon slot vs Cow, objective XP/hr)...');
+const result = await globalThis.__harness.optimize(
+    { monsterId: 'melvorD:Cow', entityId: undefined },
+    { [weaponSlotId]: swords },
+    { searchTrials: 60, searchTicks: 1000, finalTrials: 200, finalTicks: 1000, maxPasses: 2 }
+);
+console.log('  status:', result.status, '| improved:', result.improved, '| sims:', result.evaluations);
+console.log('  baseline XP/s:', result.baseline.metric.toFixed(3), '-> best XP/s:', result.best.metric.toFixed(3));
+console.log('  best weapon:', result.best.loadout.get(weaponSlotId));
+for (const d of result.diff) console.log(`    ${d.slotId}: ${d.fromItemId} -> ${d.toItemId}`);
+
+const bestWeapon = result.best.loadout.get(weaponSlotId);
+console.log('\n' + (result.improved && bestWeapon === 'melvorD:Black_2H_Sword'
+    ? 'OPTIMIZER VERIFIED: upgraded Bronze -> Black 2H Sword (highest XP/hr) against the real sim.'
+    : `OPTIMIZER RAN (best=${bestWeapon}); review expectations.`));
