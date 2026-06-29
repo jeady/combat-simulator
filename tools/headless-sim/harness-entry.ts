@@ -9,6 +9,7 @@ import { Global } from 'src/worker/global';
 import { WorkerMock } from 'src/worker/context/mock';
 import { Environment } from 'src/worker/context/environment';
 import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
+import { equipmentDimensions } from 'src/app/optimizer/dimensions';
 import {
     CandidateProvider,
     EquipmentLoadout,
@@ -104,10 +105,11 @@ class HarnessCandidateProvider implements CandidateProvider {
     },
     /** Run the real CoordinateAscentOptimizer against the live SimGame, headless. */
     optimize(target: OptimizeTarget, candidatesBySlot: Record<string, string[]>, options: any) {
+        const applier = new HarnessApplier();
         const optimizer = new CoordinateAscentOptimizer(
             new HarnessScorer(),
-            new HarnessCandidateProvider(candidatesBySlot),
-            new HarnessApplier()
+            equipmentDimensions(applier, new HarnessCandidateProvider(candidatesBySlot)),
+            applier
         );
         return optimizer.run(target, options);
     }

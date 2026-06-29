@@ -1,23 +1,23 @@
 /**
- * Coordinate-ascent gear optimizer.
+ * Coordinate-ascent setup optimizer.
  *
- * Pure search logic: depends only on the injected {@link Scorer}, {@link CandidateProvider}
- * and {@link LoadoutApplier} interfaces — no game/`Global.*` dependency — so it runs headless
- * under Node with fakes (see `__tests__`). See `docs/auto-optimize.md` and the P1 plan.
+ * Pure search logic: depends only on the injected {@link Scorer}, {@link Dimension}[] and
+ * {@link SetupApplier} interfaces — no game/`Global.*` dependency — so it runs headless under
+ * Node with fakes (see `__tests__`). It iterates generic "dimensions" (equipment slots,
+ * prayers, potion, food, …), mutating one at a time. See `docs/auto-optimize.md`.
  */
 import {
     CancelToken,
-    CandidateProvider,
     DEFAULT_OPTIONS,
-    EquipmentLoadout,
+    Dimension,
+    DimensionChange,
     Evaluation,
-    LoadoutApplier,
     OptimizeOptions,
     OptimizeResult,
     OptimizeTarget,
     ProgressCallback,
     Scorer,
-    SlotChange
+    SetupApplier
 } from 'src/app/optimizer/types';
 
 /** Internal comparable score. Higher is better, with feasibility taking precedence. */
@@ -31,8 +31,8 @@ interface Score {
 export class CoordinateAscentOptimizer {
     constructor(
         private readonly scorer: Scorer,
-        private readonly candidates: CandidateProvider,
-        private readonly applier: LoadoutApplier
+        private readonly dimensions: Dimension[],
+        private readonly applier: SetupApplier
     ) {}
 
     public async run(
@@ -42,30 +42,35 @@ export class CoordinateAscentOptimizer {
         cancel?: CancelToken
     ): Promise<OptimizeResult> {
         const opts: OptimizeOptions = { ...DEFAULT_OPTIONS, ...options };
-        const slots = this.applier.slots();
-        const snap = this.applier.snapshot();
+        const dims = this.dimensions;
+        const baselineSetup = this.applier.snapshot();
         let evaluations = 0;
 
         try {
-            // Baseline: the user's current loadout. Keep a frozen copy for the final diff.
-            let incumbent = this.applier.getCurrentLoadout();
-            const baselineLoadout = new Map(incumbent);
-            this.applier.applyLoadout(incumbent);
+            // Baseline choices (for the diff) + baseline evaluation of the current setup.
+            const baselineChoices = dims.map(dim => dim.getCurrentChoice());
             const baseEval = await this.scorer.evaluate(target, opts.searchTrials, opts.searchTicks);
             evaluations++;
             let bestScore = this.toScore(baseEval, opts.deathRateThreshold);
             const baselineMetric = baseEval.metric;
             const baselineDeath = baseEval.deathRate;
+            let incumbentSnap = this.applier.snapshot();
 
-            const emit = (phase: OptimizeResult['status'] | 'searching' | 'finalizing', pass: number, slotIndex: number, slotId: string) =>
+            const emit = (
+                phase: OptimizeResult['status'] | 'searching' | 'finalizing',
+                pass: number,
+                dimIndex: number,
+                dimId: string
+            ) =>
                 onProgress?.({
                     phase: phase === 'completed' ? 'done' : phase,
                     pass,
-                    slotIndex,
-                    slotCount: slots.length,
-                    slotId,
+                    slotIndex: dimIndex,
+                    slotCount: dims.length,
+                    slotId: dimId,
                     evaluations,
-                    bestMetric: bestScore.value === -Infinity ? NaN : (this.scorer.isMaximize() ? bestScore.value : -bestScore.value),
+                    bestMetric:
+                        bestScore.value === -Infinity ? NaN : this.scorer.isMaximize() ? bestScore.value : -bestScore.value,
                     baselineMetric
                 });
 
@@ -74,32 +79,33 @@ export class CoordinateAscentOptimizer {
             for (let pass = 1; pass <= opts.maxPasses && !cancelled; pass++) {
                 let improvedThisPass = false;
 
-                for (let slotIndex = 0; slotIndex < slots.length; slotIndex++) {
+                for (let i = 0; i < dims.length; i++) {
                     if (cancel?.cancelled) {
                         cancelled = true;
                         break;
                     }
-                    const slotId = slots[slotIndex].id;
-                    const currentItem = incumbent.get(slotId);
-                    emit('searching', pass, slotIndex, slotId);
+                    const dim = dims[i];
+                    this.applier.restore(incumbentSnap);
+                    const currentChoice = dim.getCurrentChoice();
+                    emit('searching', pass, i, dim.id);
 
-                    let bestItem = currentItem;
-                    let bestSlotScore = bestScore;
+                    let bestChoice = currentChoice;
+                    let bestDimScore = bestScore;
 
-                    for (const candidateId of this.candidates.getCandidates(slotId)) {
-                        if (candidateId === currentItem) {
+                    for (const choice of dim.getCandidates()) {
+                        if (dim.equals(choice, currentChoice)) {
                             continue; // "leave as-is" is already represented by bestScore
                         }
-                        // Re-apply the incumbent first so each candidate is judged in isolation
-                        // (handles 2H/shield and weapon/ammo coupling deterministically).
-                        this.applier.applyLoadout(incumbent);
-                        this.applier.equip(slotId, candidateId);
+                        // Reset to the incumbent so each candidate is judged in isolation
+                        // (also handles equipment 2H/shield/ammo coupling deterministically).
+                        this.applier.restore(incumbentSnap);
+                        dim.applyChoice(choice);
                         const evaluation = await this.scorer.evaluate(target, opts.searchTrials, opts.searchTicks);
                         evaluations++;
                         const score = this.toScore(evaluation, opts.deathRateThreshold);
-                        if (this.better(score, bestSlotScore, opts.minImprovement)) {
-                            bestSlotScore = score;
-                            bestItem = candidateId;
+                        if (this.better(score, bestDimScore, opts.minImprovement)) {
+                            bestDimScore = score;
+                            bestChoice = choice;
                         }
                         if (cancel?.cancelled) {
                             cancelled = true;
@@ -107,14 +113,12 @@ export class CoordinateAscentOptimizer {
                         }
                     }
 
-                    if (bestItem !== currentItem) {
-                        // Commit the winner, then read back the actual (conflict-resolved) loadout.
-                        this.applier.applyLoadout(incumbent);
-                        if (bestItem !== undefined) {
-                            this.applier.equip(slotId, bestItem);
-                        }
-                        incumbent = this.applier.getCurrentLoadout();
-                        bestScore = bestSlotScore;
+                    if (!dim.equals(bestChoice, currentChoice)) {
+                        // Commit the winner, then snapshot the actual (conflict-resolved) setup.
+                        this.applier.restore(incumbentSnap);
+                        dim.applyChoice(bestChoice);
+                        incumbentSnap = this.applier.snapshot();
+                        bestScore = bestDimScore;
                         improvedThisPass = true;
                     }
                 }
@@ -125,24 +129,44 @@ export class CoordinateAscentOptimizer {
             }
 
             // Finalize: re-score the winner at full fidelity (search may have used fewer trials).
-            this.applier.applyLoadout(incumbent);
-            emit('finalizing', opts.maxPasses, slots.length, '');
+            this.applier.restore(incumbentSnap);
+            emit('finalizing', opts.maxPasses, dims.length, '');
             const finalEval = await this.scorer.evaluate(target, opts.finalTrials, opts.finalTicks);
             evaluations++;
 
+            // Diff: compare baseline choices to the incumbent's choices (live state == incumbent).
+            const dimensionDiff: DimensionChange[] = [];
+            for (let i = 0; i < dims.length; i++) {
+                const dim = dims[i];
+                const current = dim.getCurrentChoice();
+                const base = baselineChoices[i];
+                if (!dim.equals(base, current)) {
+                    dimensionDiff.push({
+                        dimensionId: dim.id,
+                        label: dim.label,
+                        from: dim.describe(base),
+                        to: dim.describe(current)
+                    });
+                }
+            }
+
             const result: OptimizeResult = {
                 status: cancelled ? 'cancelled' : 'completed',
-                baseline: { loadout: baselineLoadout, metric: baselineMetric, deathRate: baselineDeath },
-                best: { loadout: incumbent, metric: finalEval.metric, deathRate: finalEval.deathRate },
-                diff: this.diff(baselineLoadout, incumbent),
+                baselineSetup,
+                bestSetup: incumbentSnap,
+                baselineMetric,
+                baselineDeathRate: baselineDeath,
+                bestMetric: finalEval.metric,
+                bestDeathRate: finalEval.deathRate,
+                dimensionDiff,
                 evaluations,
-                improved: this.isImprovement(baselineLoadout, incumbent)
+                improved: dimensionDiff.length > 0
             };
-            emit(result.status, opts.maxPasses, slots.length, '');
+            emit(result.status, opts.maxPasses, dims.length, '');
             return result;
         } finally {
             // Always restore the user's original configuration.
-            this.applier.restore(snap);
+            this.applier.restore(baselineSetup);
         }
     }
 
@@ -155,9 +179,9 @@ export class CoordinateAscentOptimizer {
     }
 
     /**
-     * Is `a` strictly better than `b`? Feasibility dominates; among feasible loadouts the
-     * directed metric decides (with a noise-guard margin); among infeasible ones, prefer the
-     * one closer to surviving (lower death rate).
+     * Is `a` strictly better than `b`? Feasibility dominates; among feasible setups the directed
+     * metric decides (with a noise-guard margin); among infeasible ones, prefer the one closer to
+     * surviving (lower death rate).
      */
     private better(a: Score, b: Score, minImprovement: number): boolean {
         if (a.feasible !== b.feasible) {
@@ -167,22 +191,5 @@ export class CoordinateAscentOptimizer {
             return a.value > b.value + minImprovement;
         }
         return a.deathRate < b.deathRate;
-    }
-
-    private diff(from: EquipmentLoadout, to: EquipmentLoadout): SlotChange[] {
-        const changes: SlotChange[] = [];
-        const slotIds = new Set<string>([...from.keys(), ...to.keys()]);
-        for (const slotId of slotIds) {
-            const fromItemId = from.get(slotId);
-            const toItemId = to.get(slotId);
-            if (fromItemId !== toItemId) {
-                changes.push({ slotId, fromItemId, toItemId });
-            }
-        }
-        return changes;
-    }
-
-    private isImprovement(from: EquipmentLoadout, to: EquipmentLoadout): boolean {
-        return this.diff(from, to).length > 0;
     }
 }

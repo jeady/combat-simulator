@@ -46,15 +46,19 @@ export interface CandidateProvider {
     getCandidates(slotId: string): string[];
 }
 
+/** Snapshot/restore the entire combat setup (equipment + prayers + potion + food + …). */
+export interface SetupApplier {
+    /** Capture restorable state (opaque token passed back to {@link restore}). */
+    snapshot(): unknown;
+    restore(snap: unknown): void;
+}
+
 /**
  * Mutates / snapshots the world's equipment. `applyLoadout` + `equip` may resolve
  * conflicts (2H weapon clears shield, weapon clears incompatible ammo), so callers must
  * read back the actual result via {@link getCurrentLoadout} after committing a change.
  */
-export interface LoadoutApplier {
-    /** Capture restorable state (opaque token passed back to {@link restore}). */
-    snapshot(): unknown;
-    restore(snap: unknown): void;
+export interface LoadoutApplier extends SetupApplier {
     /** The equipment slots, in a stable order. */
     slots(): SlotRef[];
     /** Current equipment as a fresh map (mutating it must not affect the world). */
@@ -63,6 +67,37 @@ export interface LoadoutApplier {
     applyLoadout(loadout: EquipmentLoadout): void;
     /** Equip one item into a slot on top of the current loadout (may resolve conflicts). */
     equip(slotId: string, itemId: string): void;
+}
+
+/** A choice for a dimension — opaque to the optimizer (item id, prayer set, potion, food id…). */
+export type DimensionChoice = unknown;
+
+/**
+ * One independently-searched coordinate of the setup — an equipment slot, the prayers, the
+ * potion, the food, etc. The optimizer treats choices opaquely via these callbacks; each
+ * Dimension reads/mutates the live (sim) world and knows its own choice type. Coordinate
+ * ascent iterates dimensions generically (equipment slots are just one family of dimensions).
+ */
+export interface Dimension {
+    readonly id: string;
+    readonly label: string;
+    /** Legal choices given the current world state (candidates may be state-dependent). */
+    getCandidates(): DimensionChoice[];
+    /** The choice currently applied to the world. */
+    getCurrentChoice(): DimensionChoice;
+    /** Apply a choice to the live world (may resolve conflicts; the optimizer re-snapshots after). */
+    applyChoice(choice: DimensionChoice): void;
+    /** Value-equality of two choices (to skip the no-op candidate and detect changes). */
+    equals(a: DimensionChoice, b: DimensionChoice): boolean;
+    /** Human-readable description of a choice (for the result diff). */
+    describe(choice: DimensionChoice): string;
+}
+
+export interface DimensionChange {
+    dimensionId: string;
+    label: string;
+    from: string;
+    to: string;
 }
 
 export interface OptimizeOptions {
@@ -103,24 +138,17 @@ export interface OptimizeProgress {
     message?: string;
 }
 
-export interface SlotChange {
-    slotId: string;
-    fromItemId?: string;
-    toItemId?: string;
-}
-
-export interface LoadoutScore {
-    loadout: EquipmentLoadout;
-    metric: number;
-    deathRate: number;
-}
-
 export interface OptimizeResult {
     status: 'completed' | 'cancelled' | 'aborted';
-    baseline: LoadoutScore;
-    best: LoadoutScore;
-    /** Slot-level differences from baseline to best. */
-    diff: SlotChange[];
+    /** Opaque snapshots (the real game uses Settings; fakes use the equipment map). */
+    baselineSetup: unknown;
+    bestSetup: unknown;
+    baselineMetric: number;
+    baselineDeathRate: number;
+    bestMetric: number;
+    bestDeathRate: number;
+    /** Per-dimension changes from baseline to best. */
+    dimensionDiff: DimensionChange[];
     evaluations: number;
     improved: boolean;
     message?: string;

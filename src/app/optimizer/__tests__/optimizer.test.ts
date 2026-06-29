@@ -1,12 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
-import { OptimizeProgress } from 'src/app/optimizer/types';
+import { equipmentDimensions } from 'src/app/optimizer/dimensions';
+import { OptimizeProgress, OptimizeResult } from 'src/app/optimizer/types';
 import { cancelToken, FakeApplier, FakeCandidateProvider, FakeScorer, FakeWorld, TARGET } from 'src/app/optimizer/__tests__/fakes';
 
 function build(world: FakeWorld, scorer = new FakeScorer(world)) {
-    const optimizer = new CoordinateAscentOptimizer(scorer, new FakeCandidateProvider(world), new FakeApplier(world));
+    const applier = new FakeApplier(world);
+    const optimizer = new CoordinateAscentOptimizer(
+        scorer,
+        equipmentDimensions(applier, new FakeCandidateProvider(world)),
+        applier
+    );
     return { optimizer, scorer };
 }
+
+/** The fake's snapshot IS the equipment map, so read the best loadout straight off bestSetup. */
+const setup = (result: OptimizeResult) => result.bestSetup as Map<string, string>;
 
 describe('CoordinateAscentOptimizer', () => {
     it('reaches the known optimum across multiple slots', async () => {
@@ -27,10 +36,10 @@ describe('CoordinateAscentOptimizer', () => {
 
         expect(result.status).toBe('completed');
         expect(result.improved).toBe(true);
-        expect(result.best.loadout.get('weapon')).toBe('w2');
-        expect(result.best.loadout.get('body')).toBe('b2');
-        expect(result.best.metric).toBe(28);
-        expect(result.diff).toHaveLength(2);
+        expect(setup(result).get('weapon')).toBe('w2');
+        expect(setup(result).get('body')).toBe('b2');
+        expect(result.bestMetric).toBe(28);
+        expect(result.dimensionDiff).toHaveLength(2);
     });
 
     it('treats death rate as a hard constraint (rejects a stronger but dying loadout)', async () => {
@@ -46,9 +55,9 @@ describe('CoordinateAscentOptimizer', () => {
 
         const result = await optimizer.run(TARGET);
 
-        expect(result.best.loadout.get('weapon')).toBe('safe');
+        expect(setup(result).get('weapon')).toBe('safe');
         expect(result.improved).toBe(false);
-        expect(result.best.deathRate).toBe(0);
+        expect(result.bestDeathRate).toBe(0);
     });
 
     it('escapes an infeasible start toward a surviving loadout', async () => {
@@ -64,8 +73,8 @@ describe('CoordinateAscentOptimizer', () => {
 
         const result = await optimizer.run(TARGET);
 
-        expect(result.best.loadout.get('weapon')).toBe('survives');
-        expect(result.best.deathRate).toBe(0);
+        expect(setup(result).get('weapon')).toBe('survives');
+        expect(result.bestDeathRate).toBe(0);
         expect(result.improved).toBe(true);
     });
 
@@ -83,8 +92,8 @@ describe('CoordinateAscentOptimizer', () => {
 
         const result = await optimizer.run(TARGET);
 
-        expect(result.best.loadout.get('food')).toBe('a2');
-        expect(result.best.metric).toBe(2);
+        expect(setup(result).get('food')).toBe('a2');
+        expect(result.bestMetric).toBe(2);
     });
 
     it('restores the original loadout after running (snapshot/restore integrity)', async () => {
@@ -122,9 +131,9 @@ describe('CoordinateAscentOptimizer', () => {
         const result = await optimizer.run(TARGET);
 
         // greatsword (30) beats sword+shield (5+3=8); equipping it clears the shield slot.
-        expect(result.best.loadout.get('weapon')).toBe('greatsword');
-        expect(result.best.loadout.has('shield')).toBe(false);
-        expect(result.best.metric).toBe(30);
+        expect(setup(result).get('weapon')).toBe('greatsword');
+        expect(setup(result).has('shield')).toBe(false);
+        expect(result.bestMetric).toBe(30);
     });
 
     it('stops promptly when cancelled and reports cancelled status', async () => {
@@ -166,7 +175,7 @@ describe('CoordinateAscentOptimizer', () => {
         const result = await optimizer.run(TARGET);
 
         expect(result.improved).toBe(false);
-        expect(result.diff).toHaveLength(0);
+        expect(result.dimensionDiff).toHaveLength(0);
         // 1 baseline + 1 candidate ('worse') + 1 finalize = 3; passes stop after no improvement.
         expect(scorer.evaluations).toBeLessThanOrEqual(4);
     });

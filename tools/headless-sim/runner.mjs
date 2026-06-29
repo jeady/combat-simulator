@@ -148,11 +148,11 @@ const result = await globalThis.__harness.optimize(
     { searchTrials: 60, searchTicks: 1000, finalTrials: 200, finalTicks: 1000, maxPasses: 2 }
 );
 console.log('  status:', result.status, '| improved:', result.improved, '| sims:', result.evaluations);
-console.log('  baseline XP/s:', result.baseline.metric.toFixed(3), '-> best XP/s:', result.best.metric.toFixed(3));
-console.log('  best weapon:', result.best.loadout.get(weaponSlotId));
-for (const d of result.diff) console.log(`    ${d.slotId}: ${d.fromItemId} -> ${d.toItemId}`);
+console.log('  baseline XP/s:', result.baselineMetric.toFixed(3), '-> best XP/s:', result.bestMetric.toFixed(3));
+console.log('  best weapon:', result.bestSetup.get(weaponSlotId));
+for (const d of result.dimensionDiff) console.log(`    ${d.label}: ${d.from} -> ${d.to}`);
 
-const bestWeapon = result.best.loadout.get(weaponSlotId);
+const bestWeapon = result.bestSetup.get(weaponSlotId);
 console.log('\n' + (result.improved && bestWeapon === 'melvorD:Black_2H_Sword'
     ? 'OPTIMIZER VERIFIED: upgraded Bronze -> Black 2H Sword (highest XP/hr) against the real sim.'
     : `OPTIMIZER RAN (best=${bestWeapon}); review expectations.`));

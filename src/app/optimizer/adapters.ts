@@ -9,8 +9,10 @@ import { SimulationData } from 'src/app/simulation';
 import { PlotKey } from 'src/app/stores/plotter.store';
 import { SimulateResponse } from 'src/shared/transport/type/simulate';
 import { pruneDominated, StatVector } from 'src/app/optimizer/prune';
+import { equipmentDimensions } from 'src/app/optimizer/dimensions';
 import {
     CandidateProvider,
+    Dimension,
     EquipmentLoadout,
     Evaluation,
     LoadoutApplier,
@@ -238,4 +240,20 @@ export class GameLoadoutApplier implements LoadoutApplier {
         }
         Global.game.combat.player.equipItem(item, 0, slot, 1, true);
     }
+}
+
+/** Humanize a slot id for the UI/diff (strip namespace, replace underscores). */
+function slotLabel(slotId: string): string {
+    const local = slotId.includes(':') ? slotId.split(':')[1] : slotId;
+    return local.replace(/_/g, ' ');
+}
+
+/**
+ * Build the optimizer's search dimensions for the live game. Phase 1 covers equipment (each
+ * slot is one dimension); the same `applier` is passed to the optimizer as its SetupApplier.
+ * Consumable dimensions (prayers, potion, food) are added here next, applied uniformly via
+ * SettingsController so they reuse the verified import path.
+ */
+export function buildDimensions(applier: GameLoadoutApplier, candidates: GameCandidateProvider): Dimension[] {
+    return equipmentDimensions(applier, candidates, slotLabel);
 }

@@ -2,12 +2,13 @@ import './auto-optimize.scss';
 import { LoadTemplate } from 'src/app/user-interface/template';
 import { Global } from 'src/app/global';
 import { PageController, PageId } from 'src/app/user-interface/pages/page-controller';
-import { SettingsController } from 'src/app/settings-controller';
+import { Settings, SettingsController } from 'src/app/settings-controller';
 import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
 import {
     GameCandidateProvider,
     GameLoadoutApplier,
     GameScorer,
+    buildDimensions,
     getSelectedTarget,
     isSupportedObjective
 } from 'src/app/optimizer/adapters';
@@ -129,10 +130,11 @@ export class AutoOptimizePage extends HTMLElement {
         this._run.textContent = 'Cancel';
         this._status.textContent = 'Running…';
 
+        const applier = new GameLoadoutApplier();
         const optimizer = new CoordinateAscentOptimizer(
             this._scorer,
-            new GameCandidateProvider(true),
-            new GameLoadoutApplier()
+            buildDimensions(applier, new GameCandidateProvider(true)),
+            applier
         );
         const sim = Global.stores.simulator.state;
 
@@ -167,13 +169,10 @@ export class AutoOptimizePage extends HTMLElement {
             return;
         }
 
-        // Re-apply the winning gear on top of the user's existing configuration. The optimizer
-        // restored the original loadout on finish, so export() reflects the user's real config.
-        const settings = SettingsController.export();
-        settings.equipment = new Map(this._result.best.loadout);
-        SettingsController.import(settings);
+        // bestSetup is the full winning configuration (a Settings snapshot); apply it directly.
+        SettingsController.import(this._result.bestSetup as Settings);
 
-        this._status.textContent = 'Applied the best loadout to your configuration.';
+        this._status.textContent = 'Applied the best setup to your configuration.';
         this._apply.disabled = true;
     }
 
@@ -194,7 +193,7 @@ export class AutoOptimizePage extends HTMLElement {
     private _renderResult(result: OptimizeResult) {
         // If even the baseline couldn't be scored, every simulation failed — e.g. the character
         // can't defeat the target (a realm/setup mismatch), or the metric is unavailable for it.
-        if (!Number.isFinite(result.baseline.metric)) {
+        if (!Number.isFinite(result.baselineMetric)) {
             this._status.textContent = 'Could not optimize.';
             this._results.innerHTML =
                 `<div class="mcs-auto-optimize-warn">Every simulation failed for this target. The character ` +
@@ -208,20 +207,19 @@ export class AutoOptimizePage extends HTMLElement {
         this._status.textContent =
             result.status === 'cancelled' ? 'Cancelled — showing the best found so far.' : 'Done.';
 
-        const baseline = this._format(result.baseline.metric);
-        const best = this._format(result.best.metric);
+        const baseline = this._format(result.baselineMetric);
+        const best = this._format(result.bestMetric);
 
         let html = `<div><strong>Baseline:</strong> ${baseline}</div><div><strong>Best:</strong> ${best}</div>`;
 
         if (!result.improved) {
-            html += `<div>No improvement found over your current gear.</div>`;
+            html += `<div>No improvement found over your current setup.</div>`;
         } else {
-            html += `<div><strong>Changes (${result.diff.length}):</strong></div><ul>`;
-            for (const change of result.diff) {
-                const slot = this._slotName(change.slotId);
-                const from = this._itemName(change.fromItemId);
-                const to = this._itemName(change.toItemId);
-                html += `<li>${slot}: ${from} &rarr; ${to}</li>`;
+            html += `<div><strong>Changes (${result.dimensionDiff.length}):</strong></div><ul>`;
+            for (const change of result.dimensionDiff) {
+                // For equipment dimensions from/to are item ids; _itemName resolves them to names
+                // (and passes through non-id labels from other dimensions unchanged).
+                html += `<li>${change.label}: ${this._itemName(change.from)} &rarr; ${this._itemName(change.to)}</li>`;
             }
             html += `</ul>`;
         }
