@@ -248,12 +248,74 @@ function slotLabel(slotId: string): string {
     return local.replace(/_/g, ' ');
 }
 
+/** Owned = ever found, per the live character. */
+function isItemOwned(itemId: string): boolean {
+    const liveItem = Global.melvor.items.getObjectByID(itemId);
+    return liveItem ? Global.melvor.stats.itemFindCount(liveItem) > 0 : false;
+}
+
 /**
- * Build the optimizer's search dimensions for the live game. Phase 1 covers equipment (each
- * slot is one dimension); the same `applier` is passed to the optimizer as its SetupApplier.
- * Consumable dimensions (prayers, potion, food) are added here next, applied uniformly via
- * SettingsController so they reuse the verified import path.
+ * A non-equipment dimension that mutates one `Settings` field and re-applies the whole setup
+ * via the verified `SettingsController.import` path (the same path the config UI uses). The
+ * optimizer restores the incumbent before each candidate, so this nets out to "incumbent with
+ * one field changed".
  */
-export function buildDimensions(applier: GameLoadoutApplier, candidates: GameCandidateProvider): Dimension[] {
-    return equipmentDimensions(applier, candidates, slotLabel);
+function settingsDimension(
+    id: string,
+    label: string,
+    get: (settings: Settings) => unknown,
+    set: (settings: Settings, value: unknown) => void,
+    candidates: () => unknown[],
+    describe: (value: unknown) => string
+): Dimension {
+    return {
+        id,
+        label,
+        getCandidates: candidates,
+        getCurrentChoice: () => get(SettingsController.export()),
+        applyChoice: (choice: unknown) => {
+            // Graceful degradation: a consumable dimension that fails to apply leaves the
+            // incumbent intact (the optimizer restored it first), so it just scores as a no-op
+            // rather than breaking the whole run. The error is logged, not swallowed silently.
+            try {
+                const settings = SettingsController.export();
+                set(settings, choice);
+                SettingsController.import(settings);
+            } catch (error) {
+                Global.logger.error(`Optimizer dimension '${id}' failed to apply a choice`, error);
+            }
+        },
+        equals: (a: unknown, b: unknown) => a === b,
+        describe
+    };
+}
+
+/** Food dimension: the equipped combat food (owned). Applied via Settings.foodSelected. */
+function foodDimension(ownedOnly: boolean): Dimension {
+    return settingsDimension(
+        'food',
+        'Food',
+        settings => settings.foodSelected,
+        (settings, value) => (settings.foodSelected = value as string),
+        () => Global.game.items.food.allObjects.map(item => item.id).filter(id => !ownedOnly || isItemOwned(id)),
+        choice => (choice ? Global.game.items.getObjectByID(choice as string)?.name ?? String(choice) : 'no food')
+    );
+}
+
+/**
+ * Build the optimizer's search dimensions for the live game: equipment (each slot) plus the
+ * enabled consumable dimensions (food now; potion/prayers follow). The same `applier` is passed
+ * to the optimizer as its SetupApplier. NOTE: consumable dimensions are type-checked and reuse
+ * the verified import path, but warrant in-game verification.
+ */
+export function buildDimensions(
+    applier: GameLoadoutApplier,
+    candidates: GameCandidateProvider,
+    options: { ownedOnly?: boolean; food?: boolean } = {}
+): Dimension[] {
+    const dims = equipmentDimensions(applier, candidates, slotLabel);
+    if (options.food ?? true) {
+        dims.push(foodDimension(options.ownedOnly ?? true));
+    }
+    return dims;
 }
