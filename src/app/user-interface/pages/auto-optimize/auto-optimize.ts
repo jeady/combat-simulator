@@ -4,6 +4,7 @@ import { Global } from 'src/app/global';
 import { PageController, PageId } from 'src/app/user-interface/pages/page-controller';
 import { Settings, SettingsController } from 'src/app/settings-controller';
 import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
+import { MemoizingScorer, stableStringify } from 'src/app/optimizer/cache';
 import {
     GameCandidateProvider,
     GameLoadoutApplier,
@@ -166,8 +167,12 @@ export class AutoOptimizePage extends HTMLElement {
         this._status.textContent = 'Running…';
 
         const applier = new GameLoadoutApplier();
+        // Memoize evaluations for this run, keyed by the applied setup (Settings snapshot). Coordinate
+        // ascent re-tests unchanged setups on convergence passes; the cache serves those without a
+        // re-sim. A fresh cache per run avoids stale entries when the target/objective changes.
+        const scorer = new MemoizingScorer(this._scorer, () => stableStringify(applier.snapshot()));
         const optimizer = new CoordinateAscentOptimizer(
-            this._scorer,
+            scorer,
             buildDimensions(applier, new GameCandidateProvider(true)),
             applier
         );

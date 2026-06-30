@@ -10,6 +10,7 @@ import { WorkerMock } from 'src/worker/context/mock';
 import { Environment } from 'src/worker/context/environment';
 import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
+import { MemoizingScorer } from 'src/app/optimizer/cache';
 import {
     CandidateProvider,
     EquipmentLoadout,
@@ -19,6 +20,11 @@ import {
     Scorer,
     SlotRef
 } from 'src/app/optimizer/types';
+
+/** Stable key for a loadout map (sorted slot=item pairs) — the cache's setup identity. */
+function loadoutKey(loadout: EquipmentLoadout): string {
+    return [...loadout.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([s, i]) => `${s}=${i}`).join(',');
+}
 
 const EMPTY = 'melvorD:Empty_Equipment';
 const g = () => (Global as any).game;
@@ -104,13 +110,23 @@ class HarnessCandidateProvider implements CandidateProvider {
         return (Global as any).simulator.simulateMonster(saveString, monsterId, entityId, trials, maxTicks);
     },
     /** Run the real CoordinateAscentOptimizer against the live SimGame, headless. */
-    optimize(target: OptimizeTarget, candidatesBySlot: Record<string, string[]>, options: any) {
+    async optimize(target: OptimizeTarget, candidatesBySlot: Record<string, string[]>, options: any) {
         const applier = new HarnessApplier();
+        // Wrap the real scorer in the memoization cache (unless the test disables it). The key reads
+        // the loadout currently applied to the player, so repeated setups (convergence passes,
+        // restarts) are served without re-simulating. Exposed via __harness.cacheStats below.
+        const base: Scorer = new HarnessScorer();
+        const scorer = options?.useCache === false ? base : new MemoizingScorer(base, () => loadoutKey(applier.getCurrentLoadout()));
         const optimizer = new CoordinateAscentOptimizer(
-            new HarnessScorer(),
+            scorer,
             equipmentDimensions(applier, new HarnessCandidateProvider(candidatesBySlot)),
             applier
         );
-        return optimizer.run(target, options);
+        const result = await optimizer.run(target, options);
+        (globalThis as any).__harness.cacheStats =
+            scorer instanceof MemoizingScorer
+                ? { hits: scorer.hits, misses: scorer.misses, size: scorer.size }
+                : null;
+        return result;
     }
 };

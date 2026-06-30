@@ -147,7 +147,14 @@ const result = await globalThis.__harness.optimize(
     { [weaponSlotId]: swords },
     { searchTrials: 60, searchTicks: 1000, finalTrials: 200, finalTicks: 1000, maxPasses: 2 }
 );
-console.log('  status:', result.status, '| improved:', result.improved, '| sims:', result.evaluations);
+console.log('  status:', result.status, '| improved:', result.improved, '| evaluate() calls:', result.evaluations);
+const cacheStats = globalThis.__harness.cacheStats;
+if (cacheStats) {
+    console.log(
+        `  cache: ${cacheStats.misses} real sims, ${cacheStats.hits} cache hits` +
+            ` (${cacheStats.size} distinct setups) -> saved ${cacheStats.hits} simulations`
+    );
+}
 console.log('  baseline XP/s:', result.baselineMetric.toFixed(3), '-> best XP/s:', result.bestMetric.toFixed(3));
 console.log('  best weapon:', result.bestSetup.get(weaponSlotId));
 for (const d of result.dimensionDiff) console.log(`    ${d.label}: ${d.from} -> ${d.to}`);
