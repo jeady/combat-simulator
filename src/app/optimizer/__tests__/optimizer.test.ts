@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
-import { OptimizeProgress, OptimizeResult } from 'src/app/optimizer/types';
+import { OptimizeEvent, OptimizeProgress, OptimizeResult } from 'src/app/optimizer/types';
 import { cancelToken, FakeApplier, FakeCandidateProvider, FakeScorer, FakeWorld, TARGET } from 'src/app/optimizer/__tests__/fakes';
 
 function build(world: FakeWorld, scorer = new FakeScorer(world)) {
@@ -203,5 +203,58 @@ describe('CoordinateAscentOptimizer', () => {
         expect(updates.length).toBeGreaterThan(0);
         expect(updates.some(u => u.phase === 'searching')).toBe(true);
         expect(updates.some(u => u.phase === 'done')).toBe(true);
+    });
+
+    it('emits an evaluated event per candidate plus a best-improved event on each commit', async () => {
+        const world = new FakeWorld(
+            ['weapon', 'body'],
+            [
+                { id: 'w1', slotId: 'weapon', power: 10 },
+                { id: 'w2', slotId: 'weapon', power: 20 }, // weapon upgrade
+                { id: 'b1', slotId: 'body', power: 5 },
+                { id: 'b2', slotId: 'body', power: 8 } // body upgrade
+            ],
+            { weapon: 'w1', body: 'b1' }
+        );
+        const { optimizer } = build(world);
+        const events: OptimizeEvent[] = [];
+
+        const result = await optimizer.run(TARGET, {}, undefined, undefined, e => events.push(e));
+
+        // The baseline + each non-incumbent candidate is announced as 'evaluated'.
+        const evaluated = events.filter(e => e.type === 'evaluated');
+        expect(evaluated.length).toBeGreaterThan(0);
+        // Baseline first, with changedIndex -1 and the starting loadout.
+        expect(evaluated[0].changedIndex).toBe(-1);
+        expect(evaluated[0].choices).toEqual(['w1', 'b1']);
+
+        // Each commit (weapon then body) yields a best-improved with the accurate snapshot + choices.
+        const best = events.filter(e => e.type === 'best-improved');
+        expect(best).toHaveLength(2);
+        expect(best.map(e => e.metric)).toEqual([25, 28]); // w2+b1, then w2+b2
+        expect(best.at(-1)!.choices).toEqual(['w2', 'b2']);
+        expect(best.at(-1)!.setup).toEqual(result.bestSetup);
+        // changedIndex points at a real dimension on every event.
+        expect(events.every(e => e.changedIndex >= -1)).toBe(true);
+    });
+
+    it('carries feasibility on events and never emits best-improved for a dying setup', async () => {
+        const world = new FakeWorld(
+            ['weapon'],
+            [
+                { id: 'safe', slotId: 'weapon', power: 10, risk: 0 },
+                { id: 'glass', slotId: 'weapon', power: 100, risk: 0.5 } // higher metric, but dies
+            ],
+            { weapon: 'safe' }
+        );
+        const { optimizer } = build(world);
+        const events: OptimizeEvent[] = [];
+
+        await optimizer.run(TARGET, {}, undefined, undefined, e => events.push(e));
+
+        const glass = events.find(e => e.choices[0] === 'glass');
+        expect(glass?.feasible).toBe(false);
+        // The dying upgrade is never adopted, so no commit / best-improved fires.
+        expect(events.some(e => e.type === 'best-improved')).toBe(false);
     });
 });

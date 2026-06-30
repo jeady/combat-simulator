@@ -138,6 +138,35 @@ export interface OptimizeProgress {
     message?: string;
 }
 
+/**
+ * A fine-grained event from the search loop, for live UI feedback (icon feeds, leaderboards, a
+ * "currently evaluating" view). Distinct from {@link OptimizeProgress} (a coarse status tick): an
+ * event carries the actual setup being judged so the UI can render its loadout.
+ *
+ * `choices` is the full per-dimension choice list of the evaluated setup (the incumbent with one
+ * dimension swapped), aligned to the optimizer's `Dimension[]` order — cheap to reconstruct and
+ * enough to render a loadout. On `best-improved`, `setup` additionally carries the accurate,
+ * conflict-resolved snapshot (e.g. a 2H weapon having cleared the shield slot).
+ */
+export interface OptimizeEvent {
+    type: 'evaluated' | 'best-improved';
+    /** Per-dimension choices of the evaluated setup, aligned to the `Dimension[]` order. */
+    choices: DimensionChoice[];
+    /** Index of the dimension varied this evaluation; -1 for the baseline. */
+    changedIndex: number;
+    /** Raw (undirected) metric value the sim produced; NaN if it failed. */
+    metric: number;
+    deathRate: number;
+    /** Survived (deathRate within threshold) and produced a usable metric. */
+    feasible: boolean;
+    /** Total simulations run so far (matches {@link OptimizeProgress.evaluations}). */
+    evaluations: number;
+    /** Accurate conflict-resolved snapshot of the setup. Present on `best-improved`. */
+    setup?: unknown;
+}
+
+export type EventCallback = (event: OptimizeEvent) => void;
+
 export interface OptimizeResult {
     status: 'completed' | 'cancelled' | 'aborted';
     /** Opaque snapshots (the real game uses Settings; fakes use the equipment map). */

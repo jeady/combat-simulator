@@ -23,8 +23,36 @@
             </button>
         </div>
 
+        <details id="mcs-auto-optimize-scope" class="mcs-auto-optimize-scope">
+            <summary>Search scope — lock slots to keep them fixed</summary>
+            <div class="mcs-auto-optimize-scope-actions">
+                <button id="mcs-auto-optimize-search-all" class="mcs-button-secondary" type="button">Search all</button>
+                <button id="mcs-auto-optimize-lock-all" class="mcs-button-secondary" type="button">Lock all</button>
+            </div>
+            <div id="mcs-auto-optimize-locks" class="mcs-auto-optimize-locks"></div>
+        </details>
+
         <div id="mcs-auto-optimize-status" class="mcs-auto-optimize-status"></div>
         <div id="mcs-auto-optimize-progress" class="mcs-auto-optimize-progress"></div>
+
+        <div id="mcs-auto-optimize-live" class="mcs-auto-optimize-live-panel" style="display: none">
+            <div class="mcs-auto-optimize-section-title">Currently evaluating</div>
+            <div id="mcs-auto-optimize-live-caption" class="mcs-auto-optimize-live-caption"></div>
+            <div id="mcs-auto-optimize-live-grid"></div>
+        </div>
+
+        <div class="mcs-auto-optimize-columns">
+            <div id="mcs-auto-optimize-feed-panel" class="mcs-auto-optimize-feed-panel" style="display: none">
+                <div class="mcs-auto-optimize-section-title">New bests</div>
+                <div id="mcs-auto-optimize-feed" class="mcs-auto-optimize-feed"></div>
+            </div>
+
+            <div id="mcs-auto-optimize-leaderboard-panel" class="mcs-auto-optimize-leaderboard-panel" style="display: none">
+                <div class="mcs-auto-optimize-section-title">Top setups</div>
+                <div id="mcs-auto-optimize-leaderboard" class="mcs-auto-optimize-leaderboard"></div>
+            </div>
+        </div>
+
         <div id="mcs-auto-optimize-results" class="mcs-auto-optimize-results"></div>
         <div id="mcs-auto-optimize-build" class="text-muted mcs-auto-optimize-build"></div>
     </div>

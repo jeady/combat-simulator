@@ -14,7 +14,17 @@ import {
     isSupportedTarget,
     slayerTaskTargetId
 } from 'src/app/optimizer/adapters';
-import { CancelToken, OptimizePhase, OptimizeProgress, OptimizeResult, OptimizeTarget } from 'src/app/optimizer/types';
+import {
+    CancelToken,
+    Dimension,
+    DimensionChoice,
+    OptimizeEvent,
+    OptimizePhase,
+    OptimizeProgress,
+    OptimizeResult,
+    OptimizeTarget
+} from 'src/app/optimizer/types';
+import { choicesToLoadout, LiveLoadoutGrid, loadoutRow } from './loadout-view';
 import { Lookup } from 'src/shared/utils/lookup';
 
 // Injected at build time by webpack DefinePlugin (see webpack.config.ts) so the page can show which
@@ -25,6 +35,24 @@ declare global {
     interface HTMLElementTagNameMap {
         'mcs-auto-optimize': AutoOptimizePage;
     }
+}
+
+/** One scored setup, kept for the leaderboard (keyed by its serialized choice list). */
+interface LeaderEntry {
+    key: string;
+    choices: DimensionChoice[];
+    metric: number;
+    deathRate: number;
+    feasible: boolean;
+}
+
+/**
+ * Wrap a dimension so the optimizer never varies it — its single choice is "stay as-is", so the
+ * inner search skips it. It still appears in the aligned choice list (so the live grid renders the
+ * locked slot's real item), it just never changes. This is how the "lock a slot" control works.
+ */
+function lockedDimension(dim: Dimension): Dimension {
+    return { ...dim, getCandidates: () => [] };
 }
 
 @LoadTemplate('app/user-interface/pages/auto-optimize/auto-optimize.html')
@@ -40,9 +68,32 @@ export class AutoOptimizePage extends HTMLElement {
     private readonly _results: HTMLDivElement;
     private readonly _build: HTMLDivElement;
 
+    private readonly _locks: HTMLDivElement;
+    private readonly _searchAll: HTMLButtonElement;
+    private readonly _lockAll: HTMLButtonElement;
+
+    private readonly _livePanel: HTMLDivElement;
+    private readonly _liveCaption: HTMLDivElement;
+    private readonly _liveGridHost: HTMLDivElement;
+    private readonly _feedPanel: HTMLDivElement;
+    private readonly _feed: HTMLDivElement;
+    private readonly _leaderboardPanel: HTMLDivElement;
+    private readonly _leaderboard: HTMLDivElement;
+
     private readonly _scorer = new GameScorer();
     private _cancel?: CancelToken;
     private _result?: OptimizeResult;
+
+    /** Dimension ids the user has locked (excluded from the search). */
+    private readonly _lockedDims = new Set<string>();
+    /** Dimensions used for the current/last run, for rendering aligned choice lists. */
+    private _runDims: Dimension[] = [];
+
+    private _liveGrid?: LiveLoadoutGrid;
+    private readonly _leaderboardMap = new Map<string, LeaderEntry>();
+    private _latest?: OptimizeEvent;
+    private _renderScheduled = false;
+    private _leaderboardSig = '';
 
     constructor() {
         super();
@@ -57,6 +108,18 @@ export class AutoOptimizePage extends HTMLElement {
         this._progress = getElementFromFragment(this._content, 'mcs-auto-optimize-progress', 'div');
         this._results = getElementFromFragment(this._content, 'mcs-auto-optimize-results', 'div');
         this._build = getElementFromFragment(this._content, 'mcs-auto-optimize-build', 'div');
+
+        this._locks = getElementFromFragment(this._content, 'mcs-auto-optimize-locks', 'div');
+        this._searchAll = getElementFromFragment(this._content, 'mcs-auto-optimize-search-all', 'button');
+        this._lockAll = getElementFromFragment(this._content, 'mcs-auto-optimize-lock-all', 'button');
+
+        this._livePanel = getElementFromFragment(this._content, 'mcs-auto-optimize-live', 'div');
+        this._liveCaption = getElementFromFragment(this._content, 'mcs-auto-optimize-live-caption', 'div');
+        this._liveGridHost = getElementFromFragment(this._content, 'mcs-auto-optimize-live-grid', 'div');
+        this._feedPanel = getElementFromFragment(this._content, 'mcs-auto-optimize-feed-panel', 'div');
+        this._feed = getElementFromFragment(this._content, 'mcs-auto-optimize-feed', 'div');
+        this._leaderboardPanel = getElementFromFragment(this._content, 'mcs-auto-optimize-leaderboard-panel', 'div');
+        this._leaderboard = getElementFromFragment(this._content, 'mcs-auto-optimize-leaderboard', 'div');
     }
 
     public connectedCallback() {
@@ -70,13 +133,26 @@ export class AutoOptimizePage extends HTMLElement {
         this._run.onclick = () => this._onRun();
         this._apply.onclick = () => this._onApply();
 
+        this._searchAll.onclick = () => {
+            this._lockedDims.clear();
+            this._renderLocks();
+        };
+        this._lockAll.onclick = () => {
+            for (const dim of this._buildDisplayDimensions()) {
+                this._lockedDims.add(dim.id);
+            }
+            this._renderLocks();
+        };
+
         PageController.on(id => {
             if (id === PageId.AutoOptimize) {
                 this._refreshObjective();
+                this._renderLocks();
             }
         });
 
         this._refreshObjective();
+        this._renderLocks();
     }
 
     /** Show the current objective + target (read live from the Simulate page selections). */
@@ -116,6 +192,43 @@ export class AutoOptimizePage extends HTMLElement {
             return `${Lookup.tasks.getObjectByID(taskId)?.name ?? taskId} (slayer task)`;
         }
         return Global.game.monsters.getObjectByID(target.monsterId)?.name ?? target.monsterId;
+    }
+
+    /** Fresh dimensions reflecting the current config (for the lock panel + run). */
+    private _buildDisplayDimensions(): Dimension[] {
+        const applier = new GameLoadoutApplier();
+        return buildDimensions(applier, new GameCandidateProvider(true));
+    }
+
+    /** Render the lock panel: one row per dimension with a "search this" checkbox + current icon. */
+    private _renderLocks() {
+        const dims = this._buildDisplayDimensions();
+        this._locks.innerHTML = '';
+
+        for (const dim of dims) {
+            const locked = this._lockedDims.has(dim.id);
+            const row = createElement('div', { classList: ['mcs-auto-optimize-lock-row'] });
+            row.classList.toggle('mcs-ao-locked', locked);
+
+            const checkbox = createElement('input', { attributes: [['type', 'checkbox']] });
+            checkbox.checked = !locked;
+            checkbox.onchange = () => {
+                if (checkbox.checked) {
+                    this._lockedDims.delete(dim.id);
+                } else {
+                    this._lockedDims.add(dim.id);
+                }
+                row.classList.toggle('mcs-ao-locked', !checkbox.checked);
+            };
+
+            // Current choice as a small icon (empty slots/consumables simply render no icon).
+            const icon = loadoutRow(choicesToLoadout([dim], [dim.getCurrentChoice()]));
+            const label = createElement('label', { text: dim.label });
+            label.onclick = () => checkbox.click();
+
+            row.append(checkbox, icon, label);
+            this._locks.appendChild(row);
+        }
     }
 
     private async _onRun() {
@@ -161,16 +274,18 @@ export class AutoOptimizePage extends HTMLElement {
         this._apply.disabled = true;
         this._results.innerHTML = '';
         this._progress.textContent = '';
+        this._resetLiveFeedback();
         Global.stores.optimizer.set({ isRunning: true });
         this._run.textContent = 'Cancel';
         this._status.textContent = 'Running…';
 
         const applier = new GameLoadoutApplier();
-        const optimizer = new CoordinateAscentOptimizer(
-            this._scorer,
-            buildDimensions(applier, new GameCandidateProvider(true)),
-            applier
+        // Keep every dimension in the array (so locked slots still render in the live grid); locked
+        // ones are wrapped so the search never varies them.
+        this._runDims = buildDimensions(applier, new GameCandidateProvider(true)).map(dim =>
+            this._lockedDims.has(dim.id) ? lockedDimension(dim) : dim
         );
+        const optimizer = new CoordinateAscentOptimizer(this._scorer, this._runDims, applier);
         const sim = Global.stores.simulator.state;
 
         try {
@@ -187,7 +302,8 @@ export class AutoOptimizePage extends HTMLElement {
                     finalTicks: sim.ticks
                 },
                 progress => this._renderProgress(progress),
-                cancel
+                cancel,
+                event => this._onEvent(event)
             );
             this._result = result;
             Global.stores.optimizer.set({ result });
@@ -213,6 +329,141 @@ export class AutoOptimizePage extends HTMLElement {
 
         this._status.textContent = 'Applied the best setup to your configuration.';
         this._apply.disabled = true;
+        this._renderLocks();
+    }
+
+    /** Clear and show the live-feedback panels for a fresh run. */
+    private _resetLiveFeedback() {
+        this._leaderboardMap.clear();
+        this._leaderboardSig = '';
+        this._latest = undefined;
+        this._feed.innerHTML = '';
+        this._leaderboard.innerHTML = '';
+        this._liveCaption.textContent = '';
+        this._liveGridHost.innerHTML = '';
+        this._liveGrid = new LiveLoadoutGrid();
+        this._liveGridHost.appendChild(this._liveGrid.element);
+        this._livePanel.style.display = '';
+        this._feedPanel.style.display = '';
+        this._leaderboardPanel.style.display = '';
+    }
+
+    /** Fold one optimizer event into the leaderboard + live state, scheduling a coalesced repaint. */
+    private _onEvent(event: OptimizeEvent) {
+        const key = JSON.stringify(event.choices);
+        const existing = this._leaderboardMap.get(key);
+        if (!existing || this._directed(event.metric) > this._directed(existing.metric)) {
+            this._leaderboardMap.set(key, {
+                key,
+                choices: event.choices,
+                metric: event.metric,
+                deathRate: event.deathRate,
+                feasible: event.feasible
+            });
+        }
+
+        this._latest = event;
+        if (event.type === 'best-improved') {
+            this._appendFeed(event);
+        }
+        this._scheduleRender();
+    }
+
+    /** Coalesce live-grid + leaderboard repaints to one per animation frame (events can be bursty). */
+    private _scheduleRender() {
+        if (this._renderScheduled) {
+            return;
+        }
+        this._renderScheduled = true;
+        requestAnimationFrame(() => {
+            this._renderScheduled = false;
+            this._flushRender();
+        });
+    }
+
+    private _flushRender() {
+        if (this._latest && this._liveGrid) {
+            const loadout = choicesToLoadout(this._runDims, this._latest.choices);
+            const changedId =
+                this._latest.changedIndex >= 0 ? this._runDims[this._latest.changedIndex]?.id : undefined;
+            this._liveGrid.update(loadout, changedId);
+            this._liveCaption.textContent = this._candidateCaption(this._latest);
+        }
+        this._renderLeaderboard();
+    }
+
+    private _candidateCaption(event: OptimizeEvent): string {
+        const metric = Number.isFinite(event.metric) ? `${this._format(event.metric)}${this._metricUnit()}` : 'failed';
+        const death = `${(event.deathRate * 100).toFixed(1)}% death`;
+        const flag = event.feasible ? '' : ' · infeasible';
+        return `trying ${metric} · ${death}${flag}`;
+    }
+
+    /** Append one "new best" row (compact icon strip + metric) to the feed. */
+    private _appendFeed(event: OptimizeEvent) {
+        const loadout = choicesToLoadout(this._runDims, event.choices);
+        const changedId = event.changedIndex >= 0 ? this._runDims[event.changedIndex]?.id : undefined;
+
+        const entry = createElement('div', { classList: ['mcs-ao-entry'] });
+        const row = loadoutRow(loadout, changedId);
+        const metric = createElement('div', {
+            classList: ['mcs-ao-entry-metric'],
+            text: `${this._format(event.metric)}${this._metricUnit()}`
+        });
+        entry.append(row, metric);
+        this._feed.appendChild(entry);
+        this._feed.scrollTop = this._feed.scrollHeight;
+    }
+
+    private _renderLeaderboard() {
+        const entries = [...this._leaderboardMap.values()]
+            .sort((a, b) => {
+                if (a.feasible !== b.feasible) {
+                    return a.feasible ? -1 : 1;
+                }
+                return this._directed(b.metric) - this._directed(a.metric);
+            })
+            .slice(0, 10);
+
+        // Skip the (tooltip-rebuilding) repaint when the top-10 membership/order hasn't changed.
+        const sig = entries.map(entry => entry.key).join('|');
+        if (sig === this._leaderboardSig) {
+            return;
+        }
+        this._leaderboardSig = sig;
+
+        this._leaderboard.innerHTML = '';
+        entries.forEach((entry, index) => {
+            const loadout = choicesToLoadout(this._runDims, entry.choices);
+            const row = createElement('div', { classList: ['mcs-ao-entry'] });
+
+            const rank = createElement('div', { classList: ['mcs-ao-entry-rank'], text: `#${index + 1}` });
+            const icons = loadoutRow(loadout);
+
+            const metricText = Number.isFinite(entry.metric) ? `${this._format(entry.metric)}${this._metricUnit()}` : '—';
+            const death = entry.feasible ? '' : ` ☠${(entry.deathRate * 100).toFixed(0)}%`;
+            const metric = createElement('div', {
+                classList: entry.feasible ? ['mcs-ao-entry-metric'] : ['mcs-ao-entry-metric', 'mcs-ao-infeasible'],
+                text: metricText + death
+            });
+
+            row.append(rank, icons, metric);
+            this._leaderboard.appendChild(row);
+        });
+    }
+
+    /** Directed score for ranking: bigger is better, respecting the objective's direction. */
+    private _directed(metric: number): number {
+        if (!Number.isFinite(metric)) {
+            return -Infinity;
+        }
+        return this._scorer.isMaximize() ? metric : -metric;
+    }
+
+    /** The objective's time unit suffix (e.g. " /h"), or '' for non-time metrics. */
+    private _metricUnit(): string {
+        const plot = Global.stores.plotter.plotType;
+        return plot.isTime ? ` ${Global.stores.plotter.timeShorthand}` : '';
     }
 
     private _renderProgress(progress: OptimizeProgress) {
@@ -273,12 +524,6 @@ export class AutoOptimizePage extends HTMLElement {
             return 'empty';
         }
         return Global.game.items.getObjectByID(itemId)?.name ?? itemId;
-    }
-
-    private _slotName(slotId: string): string {
-        // Equipment slots don't expose a clean display name; strip the namespace and humanize.
-        const local = slotId.includes(':') ? slotId.split(':')[1] : slotId;
-        return local.replace(/_/g, ' ');
     }
 
     private _phaseLabel(phase: OptimizePhase): string {
