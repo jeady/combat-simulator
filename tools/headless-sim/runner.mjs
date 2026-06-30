@@ -163,3 +163,29 @@ const bestWeapon = result.bestSetup.get(weaponSlotId);
 console.log('\n' + (result.improved && bestWeapon === 'melvorD:Black_2H_Sword'
     ? 'OPTIMIZER VERIFIED: upgraded Bronze -> Black 2H Sword (highest XP/hr) against the real sim.'
     : `OPTIMIZER RAN (best=${bestWeapon}); review expectations.`));
+
+// --- §2a: verify death-abort actually short-circuits the trial loop at runtime ---
+// Configure a character that cannot win and will die: level 1 combat, ~10 HP, no equipment, vs a
+// Cow (always accessible). It dies long before it can grind the Cow down with fists, so deathCount
+// climbs every trial. With deathAbortThreshold=1 the run must break after the first death — far
+// fewer ticks than running all trials.
+console.log('\nVerifying §2a death-abort (weak character vs Cow)...');
+game.combat.player.equipment.unequipAll();
+for (const id of ['Attack', 'Strength', 'Defence', 'Ranged', 'Magic']) player.skillLevel.set(`melvorD:${id}`, 1);
+player.skillLevel.set('melvorD:Hitpoints', 1); // ~10 HP, no food => dies fast
+const weakSave = game.generateSaveStringSimple();
+const ABORT_TRIALS = 20;
+const ABORT_TICKS = 2000;
+const full = await globalThis.__harness.simulate(weakSave, 'melvorD:Cow', undefined, ABORT_TRIALS, ABORT_TICKS);
+const aborted = await globalThis.__harness.simulate(weakSave, 'melvorD:Cow', undefined, ABORT_TRIALS, ABORT_TICKS, 1);
+const pct = full.tickCount > 0 ? ((aborted.tickCount / full.tickCount) * 100).toFixed(0) : 'n/a';
+console.log(`  full (no abort): deathRate ${Number(full.deathRate).toFixed(2)}, tickCount ${full.tickCount}`);
+console.log(`  abort=1:         deathRate ${Number(aborted.deathRate).toFixed(2)}, tickCount ${aborted.tickCount}`);
+const abortWorked =
+    Number(full.deathRate) > 0 && aborted.tickCount > 0 && aborted.tickCount < full.tickCount * 0.5;
+console.log(
+    '  ' +
+        (abortWorked
+            ? `DEATH-ABORT VERIFIED: aborted run used ${pct}% of the ticks (broke after the first death).`
+            : `DEATH-ABORT INCONCLUSIVE (full ticks ${full.tickCount}, abort ticks ${aborted.tickCount}); review.`)
+);

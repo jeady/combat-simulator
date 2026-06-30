@@ -106,8 +106,22 @@ class HarnessCandidateProvider implements CandidateProvider {
         await Environment.init(data);
         return true;
     },
-    simulate(saveString: string, monsterId: string, entityId: string | undefined, trials: number, maxTicks: number) {
-        return (Global as any).simulator.simulateMonster(saveString, monsterId, entityId, trials, maxTicks);
+    simulate(
+        saveString: string,
+        monsterId: string,
+        entityId: string | undefined,
+        trials: number,
+        maxTicks: number,
+        deathAbortThreshold?: number
+    ) {
+        return (Global as any).simulator.simulateMonster(
+            saveString,
+            monsterId,
+            entityId,
+            trials,
+            maxTicks,
+            deathAbortThreshold
+        );
     },
     /** Run the real CoordinateAscentOptimizer against the live SimGame, headless. */
     async optimize(target: OptimizeTarget, candidatesBySlot: Record<string, string[]>, options: any) {
