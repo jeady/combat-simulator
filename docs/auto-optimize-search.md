@@ -103,11 +103,23 @@ wasted work. Large speedup on the (many) candidates that die.
 - **Reporting:** when aborted early, deathRate is a lower bound, not exact — flag the result so the
   UI/optimizer treats it as "infeasible (aborted)" rather than a precise rate.
 
-### 2b. Analytic two-tier pre-rank
-Wire `analytic-scorer.ts`: rank a slot's surviving candidates by the closed-form DPS surrogate,
-full-sim only the top-K. Turns "full-sim every owned item" into "full-sim the few that could win."
-- Needs a stats-deriving adapter reading player maxHit/minHit/accuracy/attackInterval + target
-  hitpoints/evasion off the live combat objects (noted as TODO in project P2).
+### 2b. Analytic two-tier pre-rank  ◑ PURE CORE DONE (2026-06-29); deriver pending
+Rank a slot's surviving candidates by the closed-form DPS surrogate (`analytic-scorer.ts`), full-sim
+only the top-K. Turns "full-sim every owned item" into "full-sim the few that could win."
+- **Done (`optimizer/prerank.ts`):** `selectTopK` + `PreRankingCandidateProvider` — wraps the
+  existing `CandidateProvider`, narrows each slot to top-K by an **injected** `scoreItem` score.
+  Chosen as a provider wrapper specifically so it needs **no `optimizer.ts` change** (avoids the
+  other session's event-code contention). Pure + 11 unit tests. Slots with ≤K pass through; current
+  item always retained; K configurable (≤0 disables). HEURISTIC (unlike `prune.ts`): too-small K can
+  drop the optimum, hence configurable K.
+- **Pending (game-coupled, verification-heavy):** the `scoreItem` deriver — equip the candidate on
+  the current background, recompute, read surrogate inputs. Key finding: `player.equipItem(...,
+  isImporting=true)` SKIPS the stat recompute, so the deriver must call
+  `player.manager.computeAllStats()` (or `updateForEquipmentChange()`) after equipping, then read
+  `player.stats.{maxHit,minHit,accuracy,attackInterval}` and the target's hitpoints + the
+  attack-type-correct evasion off the enemy. The accuracy/evasion-by-attack-type mapping needs
+  in-game/harness verification (compare analytic top pick vs the full-sim winner) — best coordinated
+  with the sim-verification session. This is the only remaining piece of 2b.
 - Configurable K. This is the generalized form of "skip obviously-worse tiers."
 
 ### 2c. Memoization cache  ✅ IMPLEMENTED (2026-06-29)
