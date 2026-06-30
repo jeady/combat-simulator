@@ -10,6 +10,7 @@ import { PlotKey } from 'src/app/stores/plotter.store';
 import { SimulateResponse } from 'src/shared/transport/type/simulate';
 import { pruneDominated, StatVector } from 'src/app/optimizer/prune';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
+import { Lookup } from 'src/shared/utils/lookup';
 import {
     CandidateProvider,
     Dimension,
@@ -57,6 +58,43 @@ export function isSupportedObjective(): boolean {
     return !UNSUPPORTED_KEYS.has(Global.stores.plotter.plotType.key);
 }
 
+/**
+ * The slayer-task id a target refers to, or undefined. A slayer task can arrive in EITHER field
+ * depending on how it was selected on the Simulate page: inspecting a task puts its id in `entityId`,
+ * but picking it from the "Select Target" dropdown puts it in `monsterId` (with no `entityId`). A
+ * slayer-task id is never a monster id, so checking both is unambiguous — and necessary, or the
+ * natural dropdown selection silently falls through to the plain-monster path and every sim fails.
+ */
+export function slayerTaskTargetId(target: OptimizeTarget | undefined): string | undefined {
+    if (!target) {
+        return undefined;
+    }
+    if (target.entityId && Lookup.isSlayerTask(target.entityId)) {
+        return target.entityId;
+    }
+    if (target.monsterId && Lookup.isSlayerTask(target.monsterId)) {
+        return target.monsterId;
+    }
+    return undefined;
+}
+
+/**
+ * A slayer-task category (e.g. an "Auto Slayer" tier) isn't a single simulatable combat area: the
+ * Simulate page sims each accessible task monster individually (entityId undefined) and averages
+ * them. {@link GameScorer.evaluate} replicates that, so slayer tasks ARE supported — provided the
+ * character can reach at least one monster in the task (otherwise there is nothing to score).
+ */
+export function isSupportedTarget(target: OptimizeTarget | undefined): boolean {
+    if (!target) {
+        return false;
+    }
+    const taskId = slayerTaskTargetId(target);
+    if (taskId) {
+        return Global.simulation.getAccessibleSlayerTaskMonsters(taskId).length > 0;
+    }
+    return true;
+}
+
 /** Resolve the target the user currently has selected on the Simulate page. */
 export function getSelectedTarget(): OptimizeTarget | undefined {
     const monsterId = Global.stores.plotter.selectedMonsterId;
@@ -73,39 +111,121 @@ export function getSelectedTarget(): OptimizeTarget | undefined {
  */
 export class GameScorer implements Scorer {
     public async evaluate(target: OptimizeTarget, trials: number, ticks: number): Promise<Evaluation> {
+        // A slayer-task target isn't a single simulatable entity: the Simulate page sims each
+        // accessible task monster individually (entityId undefined) and averages them. Replicate
+        // that here, via the shared averager, so the optimizer scores the task by the same number
+        // the chart shows. The task id may arrive via either target field (see slayerTaskTargetId).
+        const taskId = slayerTaskTargetId(target);
+        if (taskId) {
+            return this.evaluateSlayerTask(taskId, trials, ticks);
+        }
+
+        const data = await this.runSim(target.monsterId, target.entityId, trials, ticks);
+        if (!data) {
+            return { metric: NaN, deathRate: Infinity, success: false };
+        }
+
+        const metric = Global.simulation.getBarValue(true, data);
+        return { metric, deathRate: data.deathRate ?? 0, success: !Number.isNaN(metric) };
+    }
+
+    /**
+     * Score a slayer-task target: sim every accessible task monster individually, then fold the
+     * results into one averaged {@link SimulationData} via {@link Simulation.averageMonsterData} —
+     * the same math the Simulate chart uses — and read the plotted metric off it. Monsters whose
+     * sim failed are kept as `simSuccess:false` entries so the averager skips them.
+     */
+    private async evaluateSlayerTask(taskId: string, trials: number, ticks: number): Promise<Evaluation> {
+        const monsters = Global.simulation.getAccessibleSlayerTaskMonsters(taskId);
+        if (monsters.length === 0) {
+            Global.logger.warn('Optimizer slayer-task sim: no reachable monsters', { taskId });
+            return { metric: NaN, deathRate: Infinity, success: false };
+        }
+
+        const dataByMonster = new Map<string, SimulationData>();
+        let anySuccess = false;
+        for (const monster of monsters) {
+            // entityId undefined => the worker fights the plain monster, exactly as the Simulate queue does.
+            const data = await this.runSim(monster.id, undefined, trials, ticks);
+            if (data) {
+                anySuccess = true;
+            }
+            dataByMonster.set(monster.id, data ?? Global.simulation.newSimDataEntry(true));
+        }
+
+        if (!anySuccess) {
+            Global.logger.warn('Optimizer slayer-task sim: every task monster failed', {
+                taskId,
+                monsters: monsters.length
+            });
+            return { metric: NaN, deathRate: Infinity, success: false };
+        }
+
+        const averageData = Global.simulation.newSimDataEntry(false);
+        Global.simulation.averageMonsterData(
+            averageData,
+            monsters,
+            true,
+            taskId,
+            monster => dataByMonster.get(monster.id) as SimulationData
+        );
+
+        const metric = Global.simulation.getBarValue(true, averageData);
+        return { metric, deathRate: averageData.deathRate ?? 0, success: !Number.isNaN(metric) };
+    }
+
+    /**
+     * Run one real simulation for a single monster and return its data, or `undefined` if the sim
+     * threw or didn't succeed. The worker's own failure reason (e.g. "Simulated 0/200 trials" =>
+     * not killed within the tick budget, "cannot access area", a realm/entityId mismatch, …) is
+     * logged so an "every simulation failed" run is diagnosable instead of opaque.
+     */
+    private async runSim(
+        monsterId: string,
+        entityId: string | undefined,
+        trials: number,
+        ticks: number
+    ): Promise<SimulationData | undefined> {
         const saveString = Global.game.generateSaveStringSimple();
 
         let response: SimulateResponse;
         try {
             response = await Global.simulation.simulator.simulate({
                 saveString,
-                monsterId: target.monsterId,
+                monsterId,
                 // Must be undefined (not '') for a plain monster — the worker resolves a combat
                 // area from a non-undefined entityId and throws on '', failing every sim.
-                entityId: target.entityId as string,
+                entityId: entityId as string,
                 trials,
                 maxTicks: ticks
             });
-        } catch {
-            return { metric: NaN, deathRate: Infinity, success: false };
+        } catch (error) {
+            Global.logger.warn('Optimizer sim threw', { monsterId, entityId, error });
+            return undefined;
         }
 
         const data = response?.result as SimulationData | undefined;
         if (!data || !data.simSuccess) {
-            return { metric: NaN, deathRate: data?.deathRate ?? Infinity, success: false };
+            Global.logger.warn('Optimizer sim failed', {
+                monsterId,
+                entityId,
+                trials,
+                ticks,
+                reason: data?.reason ?? 'no result returned'
+            });
+            return undefined;
         }
 
         // Realmed plot types (XP, etc.) need data.realmId. The worker already sets it from the
         // monster's area realm; derive it the same way if it's ever missing.
         if (data.realmId === undefined) {
-            const monster = Global.game.monsters.getObjectByID(target.monsterId);
+            const monster = Global.game.monsters.getObjectByID(monsterId);
             if (monster) {
                 data.realmId = Global.game.getMonsterArea(monster).realm.id;
             }
         }
 
-        const metric = Global.simulation.getBarValue(true, data);
-        return { metric, deathRate: data.deathRate ?? 0, success: !Number.isNaN(metric) };
+        return data;
     }
 
     public isMaximize(): boolean {
@@ -196,7 +316,8 @@ export class GameLoadoutApplier implements LoadoutApplier {
     }
 
     public restore(snap: unknown): void {
-        SettingsController.import(snap as Settings);
+        // notify:false — the optimizer restores a snapshot before every candidate; the toast would flood.
+        SettingsController.import(snap as Settings, { notify: false });
     }
 
     public slots(): SlotRef[] {
@@ -280,7 +401,7 @@ function settingsDimension(
             try {
                 const settings = SettingsController.export();
                 set(settings, choice);
-                SettingsController.import(settings);
+                SettingsController.import(settings, { notify: false });
             } catch (error) {
                 Global.logger.error(`Optimizer dimension '${id}' failed to apply a choice`, error);
             }

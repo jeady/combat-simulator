@@ -766,8 +766,31 @@ export class Simulation {
     }
 
     private queueSlayerMonster(task: SlayerTaskCategory, monster: Monster) {
-        if (!monster.canSlayer) {
+        const access = this.canSimulateSlayerMonster(task, monster);
+
+        if (access !== true) {
+            // A non-slayer monster records no reason (it's simply never a task monster); every other
+            // rejection records why, exactly as the original per-branch handling did.
+            if (monster.canSlayer) {
+                this.monsterSimData[monster.id].reason = access;
+            }
             return false;
+        }
+
+        // all checks passed
+        this.pushMonsterToQueue(monster.id);
+        return true;
+    }
+
+    /**
+     * The access gate for a slayer-task monster: returns `true` if the player can be assigned and
+     * fight this monster for the given task, or the rejection reason string otherwise. Read-only —
+     * shared by {@link queueSlayerMonster} (the Simulate path) and
+     * {@link getAccessibleSlayerTaskMonsters} (the auto-optimizer path) so both use one gate.
+     */
+    private canSimulateSlayerMonster(task: SlayerTaskCategory, monster: Monster): true | string {
+        if (!monster.canSlayer) {
+            return 'monster cannot be assigned as a slayer task';
         }
 
         const categoryFilter = task.getMonsterFilter();
@@ -777,18 +800,15 @@ export class Simulation {
         const area = Global.game.getMonsterArea(monster);
 
         if (!(area instanceof SlayerArea) && !this.validateSlayerMonster(monster)) {
-            this.monsterSimData[monster.id].reason = 'cannot access area';
-            return false;
+            return 'cannot access area';
         }
 
         if (area.realm.id !== task.realm.id || area.id === 'melvorD:UnknownArea' || !categoryFilter(monster)) {
-            this.monsterSimData[monster.id].reason = 'cannot access area';
-            return false;
+            return 'cannot access area';
         }
 
         if (!Global.game.combat.checkDamageTypeRequirementsForMonster(monster, false)) {
-            this.monsterSimData[monster.id].reason = 'This monster is immune to your current Damage Type';
-            return false;
+            return 'This monster is immune to your current Damage Type';
         }
 
         if (
@@ -799,13 +819,26 @@ export class Simulation {
                 area instanceof SlayerArea
             )
         ) {
-            this.monsterSimData[monster.id].reason = 'cannot access area';
-            return false;
+            return 'cannot access area';
         }
 
-        // all checks passed
-        this.pushMonsterToQueue(monster.id);
         return true;
+    }
+
+    /**
+     * The monsters the player can actually be assigned & fight for a slayer task — i.e. the exact
+     * set the Simulate chart averages for that task. Same gate as {@link queueSlayerMonster} but
+     * with no queue/reason side effects. Used by the auto-optimizer to fan a task target out into
+     * its per-monster sims.
+     */
+    public getAccessibleSlayerTaskMonsters(taskId: string): Monster[] {
+        const task = Lookup.tasks.getObjectByID(taskId);
+
+        if (!task) {
+            return [];
+        }
+
+        return Lookup.monsters.allObjects.filter(monster => this.canSimulateSlayerMonster(task, monster) === true);
     }
 
     private validateSlayerMonster(monster: Monster) {
@@ -966,6 +999,31 @@ export class Simulation {
             }
         }
 
+        this.averageMonsterData(
+            averageData,
+            monsters,
+            isSlayerTask,
+            entityId,
+            monster => this.monsterSimData[this.simId(monster.id, isSlayerTask ? undefined : entityId)]
+        );
+    }
+
+    /**
+     * Average a set of per-monster {@link SimulationData} into `averageData`, exactly as the
+     * Simulate chart does for an aggregate target (dungeon / stronghold / depth / slayer task).
+     * Factored out of {@link compute} so the auto-optimizer can score a slayer-task target by the
+     * *same* math: it sims each task monster individually (entityId undefined) and feeds the results
+     * in via `getMonsterData`, guaranteeing its reported metric matches the chart. `getMonsterData`
+     * returns the already-simulated data for a monster; entries with `simSuccess === false` (failed
+     * / inaccessible / not-yet-run) are skipped, so the average is over the successful subset.
+     */
+    public averageMonsterData(
+        averageData: SimulationData,
+        monsters: Monster[],
+        isSlayerTask: boolean,
+        entityId: string | undefined,
+        getMonsterData: (monster: Monster) => SimulationData
+    ) {
         averageData.entityId = entityId;
         averageData.simSuccess = true;
         averageData.tickCount = 0;
@@ -978,8 +1036,7 @@ export class Simulation {
         averageData.killTimeS = 0;
 
         for (const monster of monsters) {
-            const simId = this.simId(monster.id, isSlayerTask ? undefined : entityId);
-            const monsterData = this.monsterSimData[simId];
+            const monsterData = getMonsterData(monster);
 
             if (monsterData.simSuccess) {
                 if (!isSlayerTask && !monsterData.isSkipped) {
@@ -1016,9 +1073,7 @@ export class Simulation {
             for (const key of realms) {
                 averageData[key] =
                     monsters
-                        .map(
-                            monster => this.monsterSimData[this.simId(monster.id, isSlayerTask ? undefined : entityId)]
-                        )
+                        .map(monster => getMonsterData(monster))
                         .reduce((avgData, mData) => {
                             if (!mData.simSuccess) {
                                 return avgData;
@@ -1048,7 +1103,7 @@ export class Simulation {
         averageData.markRolls = {};
 
         for (const monster of monsters) {
-            const data = this.monsterSimData[this.simId(monster.id, isSlayerTask ? undefined : entityId)];
+            const data = getMonsterData(monster);
 
             for (const runeId in data.usedRunesBreakdown) {
                 if (averageData.usedRunesBreakdown[runeId] === undefined) {
@@ -1074,8 +1129,7 @@ export class Simulation {
             averageData.markRolls = {};
 
             for (const monster of monsters) {
-                const simId = this.simId(monster.id);
-                const monsterData = this.monsterSimData[simId];
+                const monsterData = getMonsterData(monster);
 
                 if (monsterData.simSuccess) {
                     averageData.killTimeS += monsterData.killTimeS;

@@ -1,9 +1,13 @@
 import CopyPlugin from 'copy-webpack-plugin';
 import TerserPlugin from 'terser-webpack-plugin';
 import { resolve } from 'path';
-import { Configuration } from 'webpack';
+import { Configuration, DefinePlugin } from 'webpack';
 
 const isProduction = process.argv[process.argv.indexOf('--mode') + 1] === 'production';
+
+// Build stamp injected into the bundle so the UI can show which build is actually loaded. The zip's
+// `--NNNN` filename suffix is computed later at packaging time and isn't available inside the bundle.
+const buildStamp = `v${process.env.npm_package_version || '?'} · ${new Date().toISOString().slice(0, 19).replace('T', ' ')} UTC`;
 
 const config: Configuration = {
     mode: 'development',
@@ -25,6 +29,7 @@ const config: Configuration = {
         maxAssetSize: 512000
     },
     plugins: [
+        new DefinePlugin({ __MCS_BUILD__: JSON.stringify(buildStamp) }),
         new CopyPlugin({
             patterns: [
                 { from: '**/*.html', to: '[path][name][ext]', context: 'src', noErrorOnMissing: true },

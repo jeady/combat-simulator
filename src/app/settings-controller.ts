@@ -239,7 +239,7 @@ export abstract class SettingsController {
         this.import(settings);
     }
 
-    public static import(settings: Settings) {
+    public static import(settings: Settings, options: { notify?: boolean } = {}) {
         try {
             if (settings.version !== Global.context.version) {
                 Global.logger.warn(`Importing ${settings.version} settings against ${Global.context.version}.`);
@@ -345,7 +345,11 @@ export abstract class SettingsController {
             Global.userInterface.main.querySelector('mcs-agility')._updateTooltips();
             Global.userInterface.main.querySelectorAll('mcs-food-slot').forEach(element => element._update());
 
-            Notify.message('Successfully imported settings.');
+            // Suppressible so bulk programmatic importers (e.g. the optimizer, which restores a
+            // snapshot before every candidate) don't spam hundreds of toasts. Defaults to notifying.
+            if (options.notify !== false) {
+                Notify.message('Successfully imported settings.');
+            }
         } catch (error) {
             Bugs.report(true, error);
         }

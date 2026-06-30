@@ -10,9 +10,16 @@ import {
     GameScorer,
     buildDimensions,
     getSelectedTarget,
-    isSupportedObjective
+    isSupportedObjective,
+    isSupportedTarget,
+    slayerTaskTargetId
 } from 'src/app/optimizer/adapters';
-import { CancelToken, OptimizePhase, OptimizeProgress, OptimizeResult } from 'src/app/optimizer/types';
+import { CancelToken, OptimizePhase, OptimizeProgress, OptimizeResult, OptimizeTarget } from 'src/app/optimizer/types';
+import { Lookup } from 'src/shared/utils/lookup';
+
+// Injected at build time by webpack DefinePlugin (see webpack.config.ts) so the page can show which
+// build is actually loaded — the surest way to confirm a freshly built modfile took effect.
+declare const __MCS_BUILD__: string;
 
 declare global {
     interface HTMLElementTagNameMap {
@@ -31,6 +38,7 @@ export class AutoOptimizePage extends HTMLElement {
     private readonly _status: HTMLDivElement;
     private readonly _progress: HTMLDivElement;
     private readonly _results: HTMLDivElement;
+    private readonly _build: HTMLDivElement;
 
     private readonly _scorer = new GameScorer();
     private _cancel?: CancelToken;
@@ -48,10 +56,15 @@ export class AutoOptimizePage extends HTMLElement {
         this._status = getElementFromFragment(this._content, 'mcs-auto-optimize-status', 'div');
         this._progress = getElementFromFragment(this._content, 'mcs-auto-optimize-progress', 'div');
         this._results = getElementFromFragment(this._content, 'mcs-auto-optimize-results', 'div');
+        this._build = getElementFromFragment(this._content, 'mcs-auto-optimize-build', 'div');
     }
 
     public connectedCallback() {
         this.appendChild(this._content);
+
+        // __MCS_BUILD__ is a build-time literal (webpack DefinePlugin) — no runtime Global access, so
+        // this is safe even though connectedCallback can run during setup before Global.context exists.
+        this._build.textContent = `Build: ${__MCS_BUILD__}`;
 
         this._searchTrials.value = String(Global.stores.optimizer.state.searchTrials);
         this._run.onclick = () => this._onRun();
@@ -70,23 +83,39 @@ export class AutoOptimizePage extends HTMLElement {
     private _refreshObjective() {
         const plot = Global.stores.plotter.plotType;
         const target = getSelectedTarget();
-        const monsterName = target
-            ? Global.game.monsters.getObjectByID(target.monsterId)?.name ?? target.monsterId
-            : 'None selected';
+        const targetName = this._targetName(target);
         // plot.text already ends with "per" for time metrics (e.g. "XP per"), so only append the unit.
         const unit = plot.isTime ? ` ${Global.stores.plotter.timeShorthand}` : '';
         const direction = this._scorer.isMaximize() ? 'maximize' : 'minimize';
         const supported = isSupportedObjective();
+        const targetSupported = isSupportedTarget(target);
 
         this._objective.innerHTML = `
             <div><strong>Objective:</strong> ${plot.text}${unit} (${direction})</div>
-            <div><strong>Target:</strong> ${monsterName}</div>
+            <div><strong>Target:</strong> ${targetName}</div>
             ${
                 supported
                     ? ''
                     : `<div class="mcs-auto-optimize-warn">This metric isn't supported by auto-optimize yet. Pick e.g. Kills, an XP type, Death Rate, or Kill Time on the Simulate page.</div>`
             }
+            ${
+                target && !targetSupported
+                    ? `<div class="mcs-auto-optimize-warn">You can't reach any monster in this slayer task with your current setup, so there's nothing to optimize. Pick a different task or target on the Simulate page.</div>`
+                    : ''
+            }
         `;
+    }
+
+    /** Human-readable name for the selected target — a monster, or a named slayer-task tier. */
+    private _targetName(target: OptimizeTarget | undefined): string {
+        if (!target) {
+            return 'None selected';
+        }
+        const taskId = slayerTaskTargetId(target);
+        if (taskId) {
+            return `${Lookup.tasks.getObjectByID(taskId)?.name ?? taskId} (slayer task)`;
+        }
+        return Global.game.monsters.getObjectByID(target.monsterId)?.name ?? target.monsterId;
     }
 
     private async _onRun() {
@@ -109,6 +138,12 @@ export class AutoOptimizePage extends HTMLElement {
         const target = getSelectedTarget();
         if (!target) {
             this._status.textContent = 'No target selected. Open the Simulate page and select a monster first.';
+            return;
+        }
+
+        if (!isSupportedTarget(target)) {
+            this._status.textContent =
+                "You can't reach any monster in this slayer task with your current setup, so there's nothing to optimize. Pick a different task or target on the Simulate page.";
             return;
         }
 
@@ -143,7 +178,11 @@ export class AutoOptimizePage extends HTMLElement {
                 target,
                 {
                     searchTrials,
-                    searchTicks: Global.stores.optimizer.state.searchTicks,
+                    // Ticks are the per-kill budget, not a "search is cheaper" knob — cutting them
+                    // below the user's Simulate setting starves slow kills and fails every sim
+                    // (baseline included) for any target that needs >searchTicks to die. Speed comes
+                    // from fewer trials; never let the search tick budget drop below sim.ticks.
+                    searchTicks: Math.max(Global.stores.optimizer.state.searchTicks, sim.ticks),
                     finalTrials: sim.trials,
                     finalTicks: sim.ticks
                 },
