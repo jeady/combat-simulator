@@ -436,7 +436,11 @@ export class SimManager extends CombatManager {
         entityId: string,
         trials: number,
         tickLimit: number,
-        verbose = false
+        verbose = false,
+        // Abort the run early once this many deaths occur (auto-optimizer fast path). The returned
+        // stats are then partial — the caller treats deathCount > 0 as infeasible regardless of how
+        // many trials completed. Infinity (the default) never aborts, so normal sims are unaffected.
+        deathAbortThreshold: number = Infinity
     ): Promise<SimulationStats> {
         this.resetSimStats();
 
@@ -485,7 +489,11 @@ export class SimManager extends CombatManager {
 
             Global.get.logger.log(`Fighting: ${monster._name} [${area._name}]`);
 
-            while (this.simStats.killCount + this.simStats.deathCount < trials && this.tickCount < totalTickLimit) {
+            while (
+                this.simStats.killCount + this.simStats.deathCount < trials &&
+                this.tickCount < totalTickLimit &&
+                this.simStats.deathCount < deathAbortThreshold
+            ) {
                 // reset the call stack so cancel message can be processed by the worker
                 if (!(this.tickCount % 100000)) {
                     await new Promise<void>(resolve => setTimeout(() => resolve()));

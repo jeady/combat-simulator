@@ -36,7 +36,18 @@ export interface Evaluation {
  * calls this. Direction (`isMaximize`) tells the search whether bigger metric is better.
  */
 export interface Scorer {
-    evaluate(target: OptimizeTarget, trials: number, ticks: number): Promise<Evaluation>;
+    /**
+     * @param deathAbortThreshold abort the underlying sim once this many deaths occur and return a
+     * partial result (a fast path for infeasible setups). Infinity (the default) never aborts. The
+     * optimizer only passes a finite value when it is *sound* to do so — i.e. the setup would
+     * already exceed the death-rate tolerance — so an aborted result is always genuinely infeasible.
+     */
+    evaluate(
+        target: OptimizeTarget,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ): Promise<Evaluation>;
     /** True if the selected objective is maximized (kills/hr, xp/hr); false to minimize (deathRate, food used). */
     isMaximize(): boolean;
 }
@@ -111,6 +122,15 @@ export interface OptimizeOptions {
     deathRateThreshold: number;
     /** Require this much directed-metric gain to accept a swap (noise guard). Default 0. */
     minImprovement: number;
+    /**
+     * Abort a search simulation as soon as it has accrued enough deaths to be *certainly* infeasible
+     * (more than `deathRateThreshold` allows), instead of running every trial. Pure speed-up: the
+     * abort threshold is derived from `deathRateThreshold` and the trial count, so it never discards
+     * a setup that could still have ended feasible. The final re-score never aborts (so the reported
+     * death rate is exact). Default true; set false to always run full trials. See
+     * `docs/auto-optimize-search.md` §2a.
+     */
+    earlyStopOnDeath: boolean;
 }
 
 export const DEFAULT_OPTIONS: OptimizeOptions = {
@@ -120,7 +140,8 @@ export const DEFAULT_OPTIONS: OptimizeOptions = {
     finalTicks: 1000,
     maxPasses: 3,
     deathRateThreshold: 0,
-    minImprovement: 0
+    minImprovement: 0,
+    earlyStopOnDeath: true
 };
 
 export type OptimizePhase = 'searching' | 'finalizing' | 'done' | 'cancelled' | 'aborted' | 'error';

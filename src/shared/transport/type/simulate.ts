@@ -6,6 +6,13 @@ export interface SimulateRequest {
     entityId: string;
     trials: number;
     maxTicks: number;
+    /**
+     * Abort a trial run early once this many deaths have occurred, returning a partial result.
+     * Used by the auto-optimizer: a setup that dies more than the feasibility tolerance allows is
+     * already infeasible, so finishing the remaining trials is wasted work. Omitted/undefined =>
+     * no early abort (the default for the normal Simulate page), so behavior is unchanged.
+     */
+    deathAbortThreshold?: number;
 }
 
 export interface SimulateResponse {

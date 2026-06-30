@@ -7,7 +7,8 @@ export class Simulator {
         monsterId: string,
         entityId: string,
         trials: number,
-        maxTicks: number
+        maxTicks: number,
+        deathAbortThreshold?: number
     ) {
         try {
             Global.cancelStatus = false;
@@ -19,7 +20,14 @@ export class Simulator {
             Global.game.onLoad();
             Global.game.combat.player.initForWebWorker();
 
-            const stats = await Global.game.combat.runTrials(monsterId, entityId, trials, maxTicks);
+            const stats = await Global.game.combat.runTrials(
+                monsterId,
+                entityId,
+                trials,
+                maxTicks,
+                false,
+                deathAbortThreshold
+            );
 
             return Global.game.combat.convertSlowSimToResult(stats, trials);
         } catch (error) {

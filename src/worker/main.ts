@@ -26,7 +26,8 @@ export abstract class Main {
                 data.monsterId,
                 data.entityId,
                 data.trials,
-                data.maxTicks
+                data.maxTicks,
+                data.deathAbortThreshold
             );
 
             return { monsterId: data.monsterId, entityId: data.entityId, result, time: performance.now() - start };

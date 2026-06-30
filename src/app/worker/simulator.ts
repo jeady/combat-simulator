@@ -42,7 +42,8 @@ export class Simulator {
                 entityId: request.entityId,
                 saveString: request.saveString,
                 trials: request.trials,
-                maxTicks: request.maxTicks
+                maxTicks: request.maxTicks,
+                deathAbortThreshold: request.deathAbortThreshold
             }
         });
     }

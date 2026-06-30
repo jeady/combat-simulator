@@ -110,17 +110,22 @@ export function getSelectedTarget(): OptimizeTarget | undefined {
  * same plotted metric the UI uses (`Simulation.getBarValue`).
  */
 export class GameScorer implements Scorer {
-    public async evaluate(target: OptimizeTarget, trials: number, ticks: number): Promise<Evaluation> {
+    public async evaluate(
+        target: OptimizeTarget,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ): Promise<Evaluation> {
         // A slayer-task target isn't a single simulatable entity: the Simulate page sims each
         // accessible task monster individually (entityId undefined) and averages them. Replicate
         // that here, via the shared averager, so the optimizer scores the task by the same number
         // the chart shows. The task id may arrive via either target field (see slayerTaskTargetId).
         const taskId = slayerTaskTargetId(target);
         if (taskId) {
-            return this.evaluateSlayerTask(taskId, trials, ticks);
+            return this.evaluateSlayerTask(taskId, trials, ticks, deathAbortThreshold);
         }
 
-        const data = await this.runSim(target.monsterId, target.entityId, trials, ticks);
+        const data = await this.runSim(target.monsterId, target.entityId, trials, ticks, deathAbortThreshold);
         if (!data) {
             return { metric: NaN, deathRate: Infinity, success: false };
         }
@@ -135,7 +140,12 @@ export class GameScorer implements Scorer {
      * the same math the Simulate chart uses — and read the plotted metric off it. Monsters whose
      * sim failed are kept as `simSuccess:false` entries so the averager skips them.
      */
-    private async evaluateSlayerTask(taskId: string, trials: number, ticks: number): Promise<Evaluation> {
+    private async evaluateSlayerTask(
+        taskId: string,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ): Promise<Evaluation> {
         const monsters = Global.simulation.getAccessibleSlayerTaskMonsters(taskId);
         if (monsters.length === 0) {
             Global.logger.warn('Optimizer slayer-task sim: no reachable monsters', { taskId });
@@ -146,7 +156,7 @@ export class GameScorer implements Scorer {
         let anySuccess = false;
         for (const monster of monsters) {
             // entityId undefined => the worker fights the plain monster, exactly as the Simulate queue does.
-            const data = await this.runSim(monster.id, undefined, trials, ticks);
+            const data = await this.runSim(monster.id, undefined, trials, ticks, deathAbortThreshold);
             if (data) {
                 anySuccess = true;
             }
@@ -184,7 +194,8 @@ export class GameScorer implements Scorer {
         monsterId: string,
         entityId: string | undefined,
         trials: number,
-        ticks: number
+        ticks: number,
+        deathAbortThreshold?: number
     ): Promise<SimulationData | undefined> {
         const saveString = Global.game.generateSaveStringSimple();
 
@@ -197,7 +208,8 @@ export class GameScorer implements Scorer {
                 // area from a non-undefined entityId and throws on '', failing every sim.
                 entityId: entityId as string,
                 trials,
-                maxTicks: ticks
+                maxTicks: ticks,
+                deathAbortThreshold
             });
         } catch (error) {
             Global.logger.warn('Optimizer sim threw', { monsterId, entityId, error });

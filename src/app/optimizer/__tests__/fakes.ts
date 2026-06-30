@@ -126,11 +126,22 @@ export interface FakeScorerOptions {
 export class FakeScorer implements Scorer {
     public evaluations = 0;
     public lastTrials = 0;
+    /** The death-abort threshold the optimizer passed on the most recent evaluation. */
+    public lastDeathAbortThreshold: number | undefined = undefined;
+    /** Every death-abort threshold seen, in call order (search evals + the final re-score). */
+    public readonly deathAbortThresholds: (number | undefined)[] = [];
     constructor(private readonly world: FakeWorld, private readonly opts: FakeScorerOptions = {}) {}
 
-    public async evaluate(_target: OptimizeTarget, trials: number, _ticks: number): Promise<Evaluation> {
+    public async evaluate(
+        _target: OptimizeTarget,
+        trials: number,
+        _ticks: number,
+        deathAbortThreshold?: number
+    ): Promise<Evaluation> {
         this.evaluations++;
         this.lastTrials = trials;
+        this.lastDeathAbortThreshold = deathAbortThreshold;
+        this.deathAbortThresholds.push(deathAbortThreshold);
         this.opts.onEvaluate?.(this.evaluations);
         return { metric: this.world.power(), deathRate: this.world.deathRate(), success: true };
     }

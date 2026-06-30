@@ -46,10 +46,22 @@ export class CoordinateAscentOptimizer {
         const baselineSetup = this.applier.snapshot();
         let evaluations = 0;
 
+        // The most deaths a setup can have and still end feasible is floor(threshold * trials).
+        // Once it exceeds that, no number of remaining trials can rescue it, so the sim can abort.
+        // (deathRateThreshold 0 => abort on the first death.) Infinity disables the abort entirely.
+        const searchAbortThreshold = opts.earlyStopOnDeath
+            ? Math.floor(opts.deathRateThreshold * opts.searchTrials) + 1
+            : Infinity;
+
         try {
             // Baseline choices (for the diff) + baseline evaluation of the current setup.
             const baselineChoices = dims.map(dim => dim.getCurrentChoice());
-            const baseEval = await this.scorer.evaluate(target, opts.searchTrials, opts.searchTicks);
+            const baseEval = await this.scorer.evaluate(
+                target,
+                opts.searchTrials,
+                opts.searchTicks,
+                searchAbortThreshold
+            );
             evaluations++;
             let bestScore = this.toScore(baseEval, opts.deathRateThreshold);
             const baselineMetric = baseEval.metric;
@@ -100,7 +112,12 @@ export class CoordinateAscentOptimizer {
                         // (also handles equipment 2H/shield/ammo coupling deterministically).
                         this.applier.restore(incumbentSnap);
                         dim.applyChoice(choice);
-                        const evaluation = await this.scorer.evaluate(target, opts.searchTrials, opts.searchTicks);
+                        const evaluation = await this.scorer.evaluate(
+                            target,
+                            opts.searchTrials,
+                            opts.searchTicks,
+                            searchAbortThreshold
+                        );
                         evaluations++;
                         const score = this.toScore(evaluation, opts.deathRateThreshold);
                         if (this.better(score, bestDimScore, opts.minImprovement)) {
@@ -131,6 +148,8 @@ export class CoordinateAscentOptimizer {
             // Finalize: re-score the winner at full fidelity (search may have used fewer trials).
             this.applier.restore(incumbentSnap);
             emit('finalizing', opts.maxPasses, dims.length, '');
+            // No death-abort on the final re-score: the winner is feasible, so run every trial to
+            // report an exact death rate rather than a partial one.
             const finalEval = await this.scorer.evaluate(target, opts.finalTrials, opts.finalTicks);
             evaluations++;
 
