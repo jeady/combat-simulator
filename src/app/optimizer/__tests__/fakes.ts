@@ -54,19 +54,22 @@ export class FakeWorld {
 
     /** Total power of all equipped items (the maximize metric). */
     public power(): number {
-        let total = 0;
-        for (const itemId of this.current.values()) {
-            total += this.items.get(itemId)?.power ?? 0;
-        }
-        return total;
+        return this.evaluateLoadout(this.current).power;
     }
 
     public deathRate(): number {
+        return this.evaluateLoadout(this.current).deathRate;
+    }
+
+    /** Score an arbitrary loadout snapshot without touching `current` (parallel/batch-safe). */
+    public evaluateLoadout(loadout: EquipmentLoadout): { power: number; deathRate: number } {
+        let power = 0;
         let risk = 0;
-        for (const itemId of this.current.values()) {
+        for (const itemId of loadout.values()) {
+            power += this.items.get(itemId)?.power ?? 0;
             risk += this.items.get(itemId)?.risk ?? 0;
         }
-        return Math.max(0, Math.min(1, risk));
+        return { power, deathRate: Math.max(0, Math.min(1, risk)) };
     }
 }
 
@@ -155,6 +158,42 @@ export class FakeScorer implements Scorer {
 
     public isMaximize(): boolean {
         return this.opts.maximize ?? true;
+    }
+}
+
+/**
+ * A scorer that also implements the optional {@link Scorer.evaluateBatch} parallel path. Each setup
+ * (a loadout snapshot) is scored directly off the snapshot — NOT off the live world — which is the
+ * contract the real worker-pool scorer honours (it sims independent save strings concurrently). Used
+ * to prove the optimizer's batched candidate evaluation finds the same optimum as the serial path.
+ */
+export class FakeBatchScorer extends FakeScorer {
+    public batchCalls = 0;
+    public maxBatchSize = 0;
+    /** Total candidates seen across all batches (to compare with the serial evaluation count). */
+    public batchedEvaluations = 0;
+
+    constructor(private readonly batchWorld: FakeWorld, opts: FakeScorerOptions = {}) {
+        super(batchWorld, opts);
+    }
+
+    public async evaluateBatch(
+        setups: unknown[],
+        _target: OptimizeTarget,
+        _trials: number,
+        _ticks: number,
+        _deathAbortThreshold?: number
+    ): Promise<Evaluation[]> {
+        this.batchCalls++;
+        this.maxBatchSize = Math.max(this.maxBatchSize, setups.length);
+        this.batchedEvaluations += setups.length;
+        // Resolve concurrently to mimic real parallel dispatch; each is scored from its own snapshot.
+        return Promise.all(
+            setups.map(async setup => {
+                const { power, deathRate } = this.batchWorld.evaluateLoadout(setup as EquipmentLoadout);
+                return { metric: power, deathRate, success: true };
+            })
+        );
     }
 }
 

@@ -10,4 +10,9 @@ export class WebWorker {
     public async send<K extends MessageAction>(payload: MessageRequest<K>) {
         return this.transport.send(payload);
     }
+
+    /** Tear down the underlying Worker (frees its thread + loaded game data). */
+    public terminate() {
+        this.worker.terminate();
+    }
 }

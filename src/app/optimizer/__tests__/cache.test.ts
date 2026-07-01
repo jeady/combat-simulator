@@ -85,6 +85,55 @@ describe('MemoizingScorer', () => {
         expect(new MemoizingScorer(new CountingScorer(true), () => 'k').isMaximize()).toBe(true);
     });
 
+    describe('parallel path (evaluateBatch)', () => {
+        /** A batch-capable scorer: each setup's metric is a distinct counter value (detect cache hits). */
+        class CountingBatchScorer extends CountingScorer {
+            public batchCalls = 0;
+            public lastBatchSize = 0;
+            public async evaluateBatch(setups: unknown[]): Promise<Evaluation[]> {
+                this.batchCalls++;
+                this.lastBatchSize = setups.length;
+                return setups.map(() => {
+                    this.calls++;
+                    return { metric: this.calls, deathRate: 0, success: true };
+                });
+            }
+        }
+
+        it('is exposed only when the inner scorer batches AND a per-setup key is supplied', () => {
+            const withKey = new MemoizingScorer(new CountingBatchScorer(), () => 'live', s => String(s));
+            const noKey = new MemoizingScorer(new CountingBatchScorer(), () => 'live');
+            const noBatch = new MemoizingScorer(new CountingScorer(), () => 'live', s => String(s));
+            expect(typeof withKey.evaluateBatch).toBe('function');
+            expect(noKey.evaluateBatch).toBeUndefined();
+            expect(noBatch.evaluateBatch).toBeUndefined();
+        });
+
+        it('sims only the uncached setups and serves the rest from cache, aligned to input order', async () => {
+            const inner = new CountingBatchScorer();
+            // The live-setup key and the per-setup key use the SAME serialization, so a setup warmed
+            // through the single path is served to the batch path (and vice versa).
+            let live = 'b';
+            const scorer = new MemoizingScorer(inner, () => live, s => String(s));
+
+            // Warm the cache for setup 'b' via the single path (its key must match the batch key for 'b').
+            const warmed = await scorer.evaluate(TARGET, 100, 1000);
+
+            const results = await scorer.evaluateBatch!(['a', 'b', 'c'], TARGET, 100, 1000);
+
+            // 'b' served from cache (same metric as the warm-up); 'a' and 'c' freshly simmed.
+            expect(results[1]).toEqual(warmed);
+            expect(inner.batchCalls).toBe(1);
+            expect(inner.lastBatchSize).toBe(2); // only the two misses were dispatched
+            expect(results.map(r => r.success)).toEqual([true, true, true]);
+
+            // Re-running the same batch is now entirely cached (no further dispatch).
+            const again = await scorer.evaluateBatch!(['a', 'b', 'c'], TARGET, 100, 1000);
+            expect(inner.batchCalls).toBe(1);
+            expect(again).toEqual(results);
+        });
+    });
+
     describe('stableStringify (cache-key serialization)', () => {
         it('distinguishes Maps that differ (JSON.stringify would collapse both to {})', () => {
             const a = new Map([['weapon', 'bronze']]);

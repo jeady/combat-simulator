@@ -21,6 +21,21 @@ export abstract class Main {
         Global.transport.on(MessageAction.Simulate, async data => {
             const start = performance.now();
 
+            // batches > 1 => one decode, several sub-runs, per-batch results for variance estimation.
+            if (data.batches && data.batches > 1) {
+                const { result, batchResults } = await Global.simulator.simulateMonsterBatched(
+                    data.saveString,
+                    data.monsterId,
+                    data.entityId,
+                    data.trials,
+                    data.maxTicks,
+                    data.deathAbortThreshold,
+                    data.batches
+                );
+
+                return { monsterId: data.monsterId, entityId: data.entityId, result, batchResults, time: performance.now() - start };
+            }
+
             const result = await Global.simulator.simulateMonster(
                 data.saveString,
                 data.monsterId,

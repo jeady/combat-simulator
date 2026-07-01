@@ -142,20 +142,46 @@ export class CoordinateAscentOptimizer {
                     // Candidates other than "leave as-is" (already represented by bestScore).
                     const candidates = dim.getCandidates().filter(c => !dim.equals(c, currentChoice));
 
-                    // Evaluate one candidate on top of the incumbent at a given fidelity.
-                    const evalChoice = async (choice: DimensionChoice, trials: number, abort: number) => {
-                        // Reset to the incumbent so each candidate is judged in isolation
-                        // (also handles equipment 2H/shield/ammo coupling deterministically).
-                        this.applier.restore(incumbentSnap);
-                        dim.applyChoice(choice);
-                        const evaluation = await this.scorer.evaluate(target, trials, opts.searchTicks, abort);
+                    // Record one finished candidate evaluation: bump the counter, emit the live event
+                    // (incumbent with just this dimension swapped), and score it. Shared by the serial
+                    // and parallel paths so their bookkeeping is identical.
+                    const recordEval = (choice: DimensionChoice, evaluation: Evaluation) => {
                         evaluations++;
-                        // Emit the evaluated candidate (incumbent with this one dimension swapped) so
-                        // the UI can show it live and rank it on a leaderboard.
                         const candidateChoices = incumbentChoices.slice();
                         candidateChoices[i] = choice;
                         emitEvent('evaluated', i, candidateChoices, evaluation);
-                        return { score: this.toScore(evaluation, opts.deathRateThreshold), evaluation };
+                        return { choice, score: this.toScore(evaluation, opts.deathRateThreshold), evaluation };
+                    };
+
+                    // Apply a candidate on top of the incumbent (reset first so each is judged in
+                    // isolation; also resolves equipment 2H/shield/ammo coupling deterministically).
+                    const applyOnIncumbent = (choice: DimensionChoice): unknown => {
+                        this.applier.restore(incumbentSnap);
+                        dim.applyChoice(choice);
+                        return this.applier.snapshot();
+                    };
+
+                    // Evaluate a set of candidates at a fidelity, aligned to input order. When the scorer
+                    // exposes evaluateBatch (a worker pool), the candidates' setups are simmed in
+                    // parallel; otherwise they run one at a time exactly as before. Setups are always
+                    // produced serially first (cheap, no sim) so world mutation stays single-threaded.
+                    const evalChoices = async (choices: DimensionChoice[], trials: number, abort: number) => {
+                        const batch = this.scorer.evaluateBatch?.bind(this.scorer);
+                        if (batch && choices.length > 1) {
+                            const setups = choices.map(applyOnIncumbent);
+                            const evals = await batch(setups, target, trials, opts.searchTicks, abort);
+                            return choices.map((choice, idx) => recordEval(choice, evals[idx]));
+                        }
+                        const out: { choice: DimensionChoice; score: Score; evaluation: Evaluation }[] = [];
+                        for (const choice of choices) {
+                            applyOnIncumbent(choice);
+                            const evaluation = await this.scorer.evaluate(target, trials, opts.searchTicks, abort);
+                            out.push(recordEval(choice, evaluation));
+                            if (cancel?.cancelled) {
+                                break;
+                            }
+                        }
+                        return out;
                     };
 
                     // Adaptive trials (§2e): screen all candidates cheaply, then confirm only the best
@@ -168,29 +194,29 @@ export class CoordinateAscentOptimizer {
                         opts.screenKeep > 0 &&
                         candidates.length > opts.screenKeep
                     ) {
-                        const screened: { choice: DimensionChoice; score: Score }[] = [];
-                        for (const choice of candidates) {
-                            screened.push({ choice, score: (await evalChoice(choice, opts.screenTrials, screenAbortThreshold)).score });
-                            if (cancel?.cancelled) {
-                                cancelled = true;
-                                break;
-                            }
+                        const screened = await evalChoices(candidates, opts.screenTrials, screenAbortThreshold);
+                        if (cancel?.cancelled) {
+                            cancelled = true;
                         }
                         // Best-first by the same ordering as the accept test, then keep the top K.
                         screened.sort((a, b) => (this.better(a.score, b.score, 0) ? -1 : this.better(b.score, a.score, 0) ? 1 : 0));
                         toConfirm = screened.slice(0, opts.screenKeep).map(s => s.choice);
                     }
 
-                    for (const choice of toConfirm) {
+                    if (!cancelled) {
+                        for (const { choice, score, evaluation } of await evalChoices(
+                            toConfirm,
+                            opts.searchTrials,
+                            searchAbortThreshold
+                        )) {
+                            if (this.better(score, bestDimScore, opts.minImprovement, opts.significanceZ)) {
+                                bestDimScore = score;
+                                bestChoice = choice;
+                                bestDimEval = evaluation;
+                            }
+                        }
                         if (cancel?.cancelled) {
                             cancelled = true;
-                            break;
-                        }
-                        const { score, evaluation } = await evalChoice(choice, opts.searchTrials, searchAbortThreshold);
-                        if (this.better(score, bestDimScore, opts.minImprovement, opts.significanceZ)) {
-                            bestDimScore = score;
-                            bestChoice = choice;
-                            bestDimEval = evaluation;
                         }
                     }
 

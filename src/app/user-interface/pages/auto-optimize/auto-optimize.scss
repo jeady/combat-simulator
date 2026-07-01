@@ -30,6 +30,15 @@
     width: 6rem;
 }
 
+.mcs-auto-optimize-check {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin: 0;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
 .mcs-auto-optimize-hint {
     font-size: 0.85rem;
     line-height: 1.35;

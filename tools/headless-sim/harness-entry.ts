@@ -164,6 +164,29 @@ class HarnessCandidateProvider implements CandidateProvider {
         return { topK: provider.getCandidates(slotId), scores };
     },
     /**
+     * Worker-side-batching verification: run `batches` sub-runs off ONE decode and return each batch's
+     * XP/hr. Lets the runner confirm the per-batch metrics match B *fresh* single sims (no state drift
+     * from reusing the decode) and that a batch list of the right length comes back.
+     */
+    async batchedSim(target: OptimizeTarget, trials: number, ticks: number, batches: number) {
+        const saveString = g().generateSaveStringSimple();
+        const { result, batchResults } = await (Global as any).simulator.simulateMonsterBatched(
+            saveString,
+            target.monsterId,
+            target.entityId,
+            trials,
+            ticks,
+            undefined,
+            batches
+        );
+        return {
+            metric: result?.xpPerSecondMelvor,
+            deathRate: result?.deathRate,
+            batchMetrics: (batchResults ?? []).map((r: any) => r?.xpPerSecondMelvor),
+            batchDeaths: (batchResults ?? []).map((r: any) => r?.deathRate)
+        };
+    },
+    /**
      * Significance verification: score the CURRENT setup with batch-means and return the metric +
      * standard error at a given trial count, so we can confirm (against the real engine) that the
      * stderr is finite/positive and SHRINKS as trials grow (~1/√trials).

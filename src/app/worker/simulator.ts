@@ -43,12 +43,18 @@ export class Simulator {
                 saveString: request.saveString,
                 trials: request.trials,
                 maxTicks: request.maxTicks,
-                deathAbortThreshold: request.deathAbortThreshold
+                deathAbortThreshold: request.deathAbortThreshold,
+                batches: request.batches
             }
         });
     }
 
     public cancel() {
         return this.worker.send({ action: MessageAction.Cancel, data: undefined });
+    }
+
+    /** Tear down the worker (used by pooled workers; the app's single shared worker is never torn down). */
+    public terminate() {
+        this.worker.terminate();
     }
 }

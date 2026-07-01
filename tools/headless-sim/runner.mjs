@@ -191,6 +191,37 @@ console.log('  ' + (seOk
     ? 'STD-ERROR VERIFIED: finite, positive, and tighter with more trials (noise is measurable).'
     : `STD-ERROR INCONCLUSIVE (lo ${seLo.stdError}, hi ${seHi.stdError}); review.`));
 
+// --- Worker-side batching: one decode + B sub-runs must match B fresh decodes (no state drift) ---
+// The char is still level 99 with Bronze equipped. Run B fresh single sims (each re-decodes the save)
+// and one batched sim (one decode, B internal runs) at the same per-batch trial count; the per-batch
+// means should agree within Monte-Carlo noise. A systematic gap would mean runTrials leaks state
+// between batches (e.g. HP/food not reset), which is exactly what this change must NOT introduce.
+console.log('\nVerifying worker-side batching (1 decode, B runs) matches B fresh decodes...');
+const batchTarget = { monsterId: 'melvorD:Cow', entityId: undefined };
+const B = 6;
+const PER = 60;
+const save99 = game.generateSaveStringSimple();
+const freshMetrics = [];
+for (let i = 0; i < B; i++) {
+    const r = await globalThis.__harness.simulate(save99, batchTarget.monsterId, undefined, PER, 1000);
+    freshMetrics.push(r.xpPerSecondMelvor);
+}
+const batched = await globalThis.__harness.batchedSim(batchTarget, PER * B, 1000, B);
+const mean = a => a.reduce((s, x) => s + x, 0) / a.length;
+const freshMean = mean(freshMetrics);
+const batchedMean = mean(batched.batchMetrics);
+const relGap = Math.abs(batchedMean - freshMean) / freshMean;
+console.log(`  fresh  (${B}× decode): mean ${freshMean.toFixed(3)}  [${freshMetrics.map(x => x.toFixed(1)).join(', ')}]`);
+console.log(`  batched (1× decode):   mean ${batchedMean.toFixed(3)}  [${batched.batchMetrics.map(x => x.toFixed(1)).join(', ')}]`);
+const batchOk =
+    batched.batchMetrics.length === B && batched.batchMetrics.every(Number.isFinite) && relGap < 0.1;
+console.log(
+    '  ' +
+        (batchOk
+            ? `BATCHING VERIFIED: ${B} batches off one decode, mean within ${(relGap * 100).toFixed(1)}% of ${B} fresh decodes (no state drift).`
+            : `BATCHING INCONCLUSIVE (len ${batched.batchMetrics.length}, gap ${(relGap * 100).toFixed(1)}%); review.`)
+);
+
 // --- §2a: verify death-abort actually short-circuits the trial loop at runtime ---
 // Configure a character that cannot win and will die: level 1 combat, ~10 HP, no equipment, vs a
 // Cow (always accessible). It dies long before it can grind the Cow down with fists, so deathCount

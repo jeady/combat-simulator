@@ -24,6 +24,8 @@ export interface SimulatorLike {
     init(): Promise<unknown>;
     simulate(request: SimulateRequest): Promise<SimulateResponse>;
     cancel(): Promise<unknown> | unknown;
+    /** Optional teardown — real pooled workers implement it so the pool can free their threads. */
+    terminate?(): void;
 }
 
 export class WorkerPool {
@@ -75,5 +77,12 @@ export class WorkerPool {
     /** Cancel any in-progress simulation on every worker. */
     public async cancel(): Promise<void> {
         await Promise.all(this.simulators.map(sim => sim.cancel()));
+    }
+
+    /** Tear down every worker in the pool (frees their threads + loaded game data). */
+    public terminate(): void {
+        for (const sim of this.simulators) {
+            sim.terminate?.();
+        }
     }
 }

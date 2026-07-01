@@ -56,8 +56,28 @@ export class MemoizingScorer implements Scorer {
          * (conflict-resolved) loadout about to be scored. Two setups that sim identically must map
          * to the same string; setups that differ must not collide.
          */
-        private readonly setupKey: () => string
-    ) {}
+        private readonly setupKey: () => string,
+        /**
+         * A stable string for an EXPLICIT setup snapshot (not the live one) — the batch analogue of
+         * {@link setupKey}. Required to memoize the parallel {@link evaluateBatch} path, where the
+         * setups are passed in rather than applied. When omitted (or the inner scorer has no batch
+         * method) the cache exposes no {@link evaluateBatch} and the optimizer stays serial.
+         */
+        private readonly setupKeyOf?: (setup: unknown) => string
+    ) {
+        if (inner.evaluateBatch && setupKeyOf) {
+            this.evaluateBatch = this.evaluateBatchCached.bind(this);
+        }
+    }
+
+    /** Present only when the inner scorer batches AND a per-setup key function was supplied. */
+    public evaluateBatch?: (
+        setups: unknown[],
+        target: OptimizeTarget,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ) => Promise<Evaluation[]>;
 
     public async evaluate(
         target: OptimizeTarget,
@@ -75,6 +95,47 @@ export class MemoizingScorer implements Scorer {
         const evaluation = await this.inner.evaluate(target, trials, ticks, deathAbortThreshold);
         this.cache.set(key, evaluation);
         return evaluation;
+    }
+
+    /**
+     * Cached parallel path: serve any setups already in the cache for free, sim only the misses via
+     * the inner scorer's batch dispatch (the worker pool), then store and return results aligned to
+     * the input order. Cache semantics match {@link evaluate} — same key shape, one sample per key.
+     */
+    private async evaluateBatchCached(
+        setups: unknown[],
+        target: OptimizeTarget,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ): Promise<Evaluation[]> {
+        const keys = setups.map(setup => this.keyForSetup(setup, target, trials, ticks, deathAbortThreshold));
+        const results = new Array<Evaluation>(setups.length);
+        const missIndexes: number[] = [];
+        const missSetups: unknown[] = [];
+
+        keys.forEach((key, index) => {
+            const cached = this.cache.get(key);
+            if (cached !== undefined) {
+                this.hits++;
+                results[index] = cached;
+            } else {
+                missIndexes.push(index);
+                missSetups.push(setups[index]);
+            }
+        });
+
+        if (missSetups.length > 0) {
+            this.misses += missSetups.length;
+            const evaluations = await this.inner.evaluateBatch!(missSetups, target, trials, ticks, deathAbortThreshold);
+            evaluations.forEach((evaluation, j) => {
+                const index = missIndexes[j];
+                results[index] = evaluation;
+                this.cache.set(keys[index], evaluation);
+            });
+        }
+
+        return results;
     }
 
     public isMaximize(): boolean {
@@ -99,6 +160,24 @@ export class MemoizingScorer implements Scorer {
         // full (non-aborting) evaluation of the same setup.
         return [
             this.setupKey(),
+            target.monsterId,
+            target.entityId ?? '',
+            trials,
+            ticks,
+            deathAbortThreshold ?? ''
+        ].join('|');
+    }
+
+    /** Same key as {@link keyFor} but for an explicit setup snapshot (the batch path). */
+    private keyForSetup(
+        setup: unknown,
+        target: OptimizeTarget,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ): string {
+        return [
+            this.setupKeyOf!(setup),
             target.monsterId,
             target.entityId ?? '',
             trials,

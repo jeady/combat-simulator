@@ -5,7 +5,8 @@ import { PageController, PageId } from 'src/app/user-interface/pages/page-contro
 import { Settings, SettingsController } from 'src/app/settings-controller';
 import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
 import { MemoizingScorer, stableStringify } from 'src/app/optimizer/cache';
-import { BatchingScorer } from 'src/app/optimizer/batching';
+import { WorkerPool } from 'src/app/optimizer/worker-pool';
+import { createWorkerPool } from 'src/app/optimizer/worker-pool-factory';
 import {
     GameCandidateProvider,
     GameLoadoutApplier,
@@ -64,6 +65,8 @@ export class AutoOptimizePage extends HTMLElement {
 
     private readonly _objective: HTMLDivElement;
     private readonly _searchTrials: HTMLInputElement;
+    private readonly _fastSearch: HTMLInputElement;
+    private readonly _workers: HTMLInputElement;
     private readonly _run: HTMLButtonElement;
     private readonly _apply: HTMLButtonElement;
     private readonly _status: HTMLDivElement;
@@ -89,9 +92,14 @@ export class AutoOptimizePage extends HTMLElement {
     private readonly _baseCaption: HTMLDivElement;
     private readonly _baseGridHost: HTMLDivElement;
 
+    /** Pool-less scorer used only for objective-direction display (isMaximize); the run builds its own. */
     private readonly _scorer = new GameScorer();
     private _cancel?: CancelToken;
     private _result?: OptimizeResult;
+
+    /** Reused pool of parallel sim workers (built lazily; rebuilt when the worker count changes). */
+    private _pool?: WorkerPool;
+    private _poolSize = 0;
 
     /** Dimension ids the user has locked (excluded from the search). */
     private readonly _lockedDims = new Set<string>();
@@ -118,6 +126,8 @@ export class AutoOptimizePage extends HTMLElement {
 
         this._objective = getElementFromFragment(this._content, 'mcs-auto-optimize-objective', 'div');
         this._searchTrials = getElementFromFragment(this._content, 'mcs-auto-optimize-search-trials', 'input');
+        this._fastSearch = getElementFromFragment(this._content, 'mcs-auto-optimize-fast-search', 'input');
+        this._workers = getElementFromFragment(this._content, 'mcs-auto-optimize-workers', 'input');
         this._run = getElementFromFragment(this._content, 'mcs-auto-optimize-run', 'button');
         this._apply = getElementFromFragment(this._content, 'mcs-auto-optimize-apply', 'button');
         this._status = getElementFromFragment(this._content, 'mcs-auto-optimize-status', 'div');
@@ -144,6 +154,12 @@ export class AutoOptimizePage extends HTMLElement {
         this._baseGridHost = getElementFromFragment(this._content, 'mcs-auto-optimize-base-grid', 'div');
     }
 
+    public disconnectedCallback() {
+        // Free the pool's workers if the page element is ever torn down (the base single worker,
+        // owned by Global.simulation, is unaffected).
+        this._teardownPool();
+    }
+
     public connectedCallback() {
         this.appendChild(this._content);
 
@@ -152,6 +168,11 @@ export class AutoOptimizePage extends HTMLElement {
         this._build.textContent = `Build: ${__MCS_BUILD__}`;
 
         this._searchTrials.value = String(Global.stores.optimizer.state.searchTrials);
+        this._fastSearch.checked = Global.stores.optimizer.state.fastSearch;
+        this._fastSearch.onchange = () => Global.stores.optimizer.set({ fastSearch: this._fastSearch.checked });
+        this._workers.value = String(Global.stores.optimizer.state.workerCount);
+        this._workers.onchange = () =>
+            Global.stores.optimizer.set({ workerCount: Math.max(0, parseInt(this._workers.value, 10) || 0) });
         this._run.onclick = () => this._onRun();
         this._apply.onclick = () => this._onApply();
 
@@ -288,7 +309,8 @@ export class AutoOptimizePage extends HTMLElement {
         }
 
         const searchTrials = Math.max(1, parseInt(this._searchTrials.value, 10) || 200);
-        Global.stores.optimizer.set({ searchTrials });
+        const fastSearch = this._fastSearch.checked;
+        Global.stores.optimizer.set({ searchTrials, fastSearch });
 
         const cancel: CancelToken = { cancelled: false };
         this._cancel = cancel;
@@ -301,18 +323,39 @@ export class AutoOptimizePage extends HTMLElement {
         this._run.textContent = 'Cancel';
         this._status.textContent = 'Running…';
 
+        // Stand up (or reuse) the parallel worker pool. If workers > 1 this fans candidate sims across
+        // N workers; 1/auto-resolving-to-1 keeps the single-worker path. init loads game data into each
+        // worker, so it can take a moment the first time — surface that in the status line.
+        const workerCount = this._resolveWorkerCount();
+        let pool: WorkerPool | undefined;
+        if (workerCount > 1) {
+            this._status.textContent = `Starting ${workerCount} sim workers…`;
+            pool = await this._ensurePool(workerCount);
+        } else {
+            this._teardownPool();
+        }
+        // The pool init above is awaited, so the user may have cancelled meanwhile; the optimizer
+        // checks the token immediately and exits fast, and the finally below restores UI state.
+        this._status.textContent = 'Running…';
+
         const applier = new GameLoadoutApplier();
-        // Score with batch-means variance, then memoize. BatchingScorer splits each evaluation into B
-        // sub-runs to estimate the metric's standard error, which the optimizer's significance gate
-        // uses to avoid recommending noise-level swaps. The cache wraps it (keyed by the applied
-        // Settings snapshot) so convergence-pass repeats are served without re-simming.
+        // Score with batch-means variance, then memoize. GameScorer splits each evaluation into B
+        // sub-runs *inside a single worker call* to estimate the metric's standard error (which the
+        // optimizer's significance gate uses to avoid recommending noise-level swaps), so the heavy
+        // save decode is paid once per evaluation, not once per batch. When a pool is present it also
+        // exposes the parallel evaluateBatch path (candidates simmed concurrently). The cache wraps it
+        // (keyed by the applied Settings snapshot) so convergence-pass repeats are served without
+        // re-simming — including a per-setup key so the parallel path is cached too.
         const scorer = new MemoizingScorer(
-            new BatchingScorer(this._scorer),
-            () => stableStringify(applier.snapshot())
+            new GameScorer(5, 5, pool),
+            () => stableStringify(applier.snapshot()),
+            setup => stableStringify(setup)
         );
         // Keep every dimension in the array (so locked slots still render in the live grid); locked
-        // ones are wrapped so the search never varies them.
-        this._runDims = buildDimensions(applier, new GameCandidateProvider(true)).map(dim =>
+        // ones are wrapped so the search never varies them. `preRankTopK` (default 0 = off) narrows
+        // each equipment slot to its top-K analytic candidates before any real sim runs.
+        const preRankTopK = Global.stores.optimizer.state.preRankTopK;
+        this._runDims = buildDimensions(applier, new GameCandidateProvider(true), { preRankTopK }).map(dim =>
             this._lockedDims.has(dim.id) ? lockedDimension(dim) : dim
         );
         // Estimate total work up front (candidates × passes) to drive the progress bar + ETA.
@@ -332,7 +375,12 @@ export class AutoOptimizePage extends HTMLElement {
                     // from fewer trials; never let the search tick budget drop below sim.ticks.
                     searchTicks: Math.max(Global.stores.optimizer.state.searchTicks, sim.ticks),
                     finalTrials: sim.trials,
-                    finalTicks: sim.ticks
+                    finalTicks: sim.ticks,
+                    // Fast search: screen every candidate at a quarter of the search trials, then
+                    // confirm only the best few at full trials. The optimizer skips the screen pass
+                    // automatically for slots that have ≤ screenKeep candidates (no benefit there).
+                    screenTrials: fastSearch ? Math.max(10, Math.floor(searchTrials / 4)) : 0,
+                    screenKeep: 3
                 },
                 progress => this._renderProgress(progress),
                 cancel,
@@ -552,8 +600,64 @@ export class AutoOptimizePage extends HTMLElement {
      * plus the baseline + final re-score. An over-estimate (searches usually converge before maxPasses),
      * so the ETA errs long and the bar jumps to 100% on completion rather than stalling past it.
      */
+    /**
+     * Resolve the worker count from the store: >0 is used verbatim; 0 means "auto" — a modest count
+     * derived from the CPU, capped so we never spin up a swarm of data-loading workers. Clamped to a
+     * small ceiling because each worker holds a full copy of the game data.
+     */
+    private _resolveWorkerCount(): number {
+        const requested = Global.stores.optimizer.state.workerCount;
+        if (requested > 0) {
+            return Math.min(requested, 16);
+        }
+        const cores = typeof navigator !== 'undefined' && navigator.hardwareConcurrency ? navigator.hardwareConcurrency : 4;
+        // Leave a core or two for the main thread + browser; cap at 4 for the auto default.
+        return Math.max(1, Math.min(4, cores - 2));
+    }
+
+    /**
+     * Build (or reuse) a pool of `size` initialised workers. Reused across runs so the per-worker data
+     * load is paid once; rebuilt only when the requested size changes. Returns undefined (falling back
+     * to the single-worker path) if the pool fails to start.
+     */
+    private async _ensurePool(size: number): Promise<WorkerPool | undefined> {
+        if (this._pool && this._poolSize === size) {
+            return this._pool;
+        }
+        this._teardownPool();
+        try {
+            const pool = createWorkerPool(size);
+            await pool.init();
+            this._pool = pool;
+            this._poolSize = size;
+            return pool;
+        } catch (error) {
+            Global.logger.error('Auto-optimize: worker pool failed to start; using a single worker', error);
+            this._teardownPool();
+            return undefined;
+        }
+    }
+
+    /** Tear down the worker pool and forget it (frees N workers' threads + data). */
+    private _teardownPool() {
+        if (this._pool) {
+            this._pool.terminate();
+            this._pool = undefined;
+            this._poolSize = 0;
+        }
+    }
+
     private _estimateEvals(): number {
-        const perPass = this._runDims.reduce((sum, dim) => sum + Math.max(0, dim.getCandidates().length - 1), 0);
+        // With fast search, a slot that has more than screenKeep candidates pays a screen eval for
+        // each candidate plus a confirm eval for the screenKeep survivors — so count both, otherwise
+        // the progress bar races ahead and then stalls once the confirm passes run.
+        const fastSearch = Global.stores.optimizer.state.fastSearch;
+        const screenKeep = 3;
+        const perPass = this._runDims.reduce((sum, dim) => {
+            const candidates = Math.max(0, dim.getCandidates().length - 1);
+            const withConfirm = fastSearch && candidates > screenKeep ? candidates + screenKeep : candidates;
+            return sum + withConfirm;
+        }, 0);
         return Math.max(1, perPass * DEFAULT_OPTIONS.maxPasses + 2);
     }
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
 import { OptimizeEvent, OptimizeProgress, OptimizeResult, OptimizeTarget } from 'src/app/optimizer/types';
-import { cancelToken, FakeApplier, FakeCandidateProvider, FakeScorer, FakeWorld, TARGET } from 'src/app/optimizer/__tests__/fakes';
+import { cancelToken, FakeApplier, FakeBatchScorer, FakeCandidateProvider, FakeScorer, FakeWorld, TARGET } from 'src/app/optimizer/__tests__/fakes';
 
 function build(world: FakeWorld, scorer = new FakeScorer(world)) {
     const applier = new FakeApplier(world);
@@ -497,5 +497,90 @@ describe('CoordinateAscentOptimizer', () => {
         expect(glass?.feasible).toBe(false);
         // The dying upgrade is never adopted, so no commit / best-improved fires.
         expect(events.some(e => e.type === 'best-improved')).toBe(false);
+    });
+
+    describe('parallel candidate evaluation (evaluateBatch)', () => {
+        function buildBatch(world: FakeWorld, scorer = new FakeBatchScorer(world)) {
+            const applier = new FakeApplier(world);
+            const optimizer = new CoordinateAscentOptimizer(
+                scorer,
+                equipmentDimensions(applier, new FakeCandidateProvider(world)),
+                applier
+            );
+            return { optimizer, scorer };
+        }
+
+        it('finds the same optimum as the serial path and actually uses the batch dispatch', async () => {
+            const items = [
+                { id: 'w1', slotId: 'weapon', power: 10 },
+                { id: 'w2', slotId: 'weapon', power: 20 },
+                { id: 'w3', slotId: 'weapon', power: 15 },
+                { id: 'b1', slotId: 'body', power: 5 },
+                { id: 'b2', slotId: 'body', power: 8 }
+            ];
+            const start = { weapon: 'w1', body: 'b1' };
+
+            const serial = await build(new FakeWorld(['weapon', 'body'], items, start)).optimizer.run(TARGET);
+            const { optimizer, scorer } = buildBatch(new FakeWorld(['weapon', 'body'], items, start));
+            const parallel = await optimizer.run(TARGET);
+
+            // Same winner as serial coordinate ascent.
+            expect(setup(parallel).get('weapon')).toBe('w2');
+            expect(setup(parallel).get('body')).toBe('b2');
+            expect(parallel.bestMetric).toBe(serial.bestMetric);
+            // The parallel path was exercised — a batch was dispatched with more than one setup (the
+            // weapon slot has 2 non-incumbent candidates). Single-candidate slots still fall back to
+            // the serial evaluate(), and the baseline + final re-score always use it.
+            expect(scorer.batchCalls).toBeGreaterThan(0);
+            expect(scorer.maxBatchSize).toBeGreaterThan(1);
+        });
+
+        it('respects the death-rate constraint under batched evaluation', async () => {
+            const { optimizer } = buildBatch(
+                new FakeWorld(
+                    ['weapon'],
+                    [
+                        { id: 'safe', slotId: 'weapon', power: 10, risk: 0 },
+                        { id: 'strongA', slotId: 'weapon', power: 90, risk: 0.5 },
+                        { id: 'strongB', slotId: 'weapon', power: 100, risk: 0.5 }
+                    ],
+                    { weapon: 'safe' }
+                )
+            );
+
+            const result = await optimizer.run(TARGET);
+
+            expect(setup(result).get('weapon')).toBe('safe'); // both strong options die -> rejected
+            expect(result.bestDeathRate).toBe(0);
+        });
+
+        it('screens and confirms through the batch path, keeping the true optimum', async () => {
+            const { optimizer, scorer } = buildBatch(
+                new FakeWorld(
+                    ['weapon'],
+                    [
+                        { id: 'w1', slotId: 'weapon', power: 1 },
+                        { id: 'w2', slotId: 'weapon', power: 2 },
+                        { id: 'w3', slotId: 'weapon', power: 3 },
+                        { id: 'w4', slotId: 'weapon', power: 9 }, // winner
+                        { id: 'w5', slotId: 'weapon', power: 4 }
+                    ],
+                    { weapon: 'w1' }
+                )
+            );
+
+            const result = await optimizer.run(TARGET, {
+                searchTrials: 100,
+                screenTrials: 10,
+                screenKeep: 2,
+                finalTrials: 500,
+                maxPasses: 1
+            });
+
+            expect(setup(result).get('weapon')).toBe('w4');
+            // A screen batch (4 candidates) and a confirm batch (2 survivors) both dispatched.
+            expect(scorer.batchCalls).toBe(2);
+            expect(scorer.maxBatchSize).toBe(4);
+        });
     });
 });

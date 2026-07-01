@@ -58,6 +58,20 @@ export interface Scorer {
     ): Promise<Evaluation>;
     /** True if the selected objective is maximized (kills/hr, xp/hr); false to minimize (deathRate, food used). */
     isMaximize(): boolean;
+    /**
+     * Optional parallel path: evaluate several setups at once, returning evaluations aligned to the
+     * input order. Each `setup` is an opaque {@link SetupApplier} snapshot (the same value
+     * {@link SetupApplier.snapshot} returns). When a scorer implements this, the optimizer fans a
+     * dimension's candidates across it (a worker pool sims them concurrently) instead of one at a
+     * time; a scorer without it is always evaluated serially via {@link evaluate} (unchanged).
+     */
+    evaluateBatch?(
+        setups: unknown[],
+        target: OptimizeTarget,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ): Promise<Evaluation[]>;
 }
 
 /** Supplies the legal candidate item ids for a slot (owned + valid + usable). */

@@ -17,6 +17,20 @@
                 step="10"
                 value="200"
             />
+            <label class="mcs-auto-optimize-check" for="mcs-auto-optimize-fast-search">
+                <input id="mcs-auto-optimize-fast-search" type="checkbox" checked />
+                Fast search
+            </label>
+            <label class="mcs-auto-optimize-label" for="mcs-auto-optimize-workers">Workers</label>
+            <input
+                id="mcs-auto-optimize-workers"
+                class="mcs-auto-optimize-input"
+                type="number"
+                min="0"
+                step="1"
+                value="0"
+                title="Parallel sim workers. 0 = auto, 1 = single worker."
+            />
             <button id="mcs-auto-optimize-run" class="mcs-button mcs-auto-optimize-run">Run Optimization</button>
             <button id="mcs-auto-optimize-apply" class="mcs-button mcs-auto-optimize-apply" disabled>
                 Apply Best Loadout
@@ -26,7 +40,9 @@
         <div class="text-muted mcs-auto-optimize-hint">
             <strong>Search trials</strong> is how many simulated fights each candidate loadout is judged on while
             searching — fewer is faster but noisier. The single best setup found is then re-tested at your Simulate
-            page's full trial count before the result is shown.
+            page's full trial count before the result is shown. <strong>Fast search</strong> screens a slot's
+            candidates at a fraction of the trials and only re-tests the most promising few at full trials — much
+            faster on slots with many options; turn it off for an exhaustive pass.
         </div>
 
         <details id="mcs-auto-optimize-scope" class="mcs-auto-optimize-scope">

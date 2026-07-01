@@ -7,13 +7,15 @@ import { Global } from 'src/app/global';
 import { SettingsController, Settings } from 'src/app/settings-controller';
 import { SimulationData } from 'src/app/simulation';
 import { PlotKey } from 'src/app/stores/plotter.store';
-import { SimulateResponse } from 'src/shared/transport/type/simulate';
+import { SimulateRequest, SimulateResponse } from 'src/shared/transport/type/simulate';
+import { WorkerPool } from 'src/app/optimizer/worker-pool';
 import { pruneDominated, StatVector } from 'src/app/optimizer/prune';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
 import { enumerateSummonChoices, normalizeSummonChoice, SummonChoice, summonChoicesEqual } from 'src/app/optimizer/synergy';
 import { PreRankingCandidateProvider } from 'src/app/optimizer/prerank';
 import { dedupeBySignature } from 'src/app/optimizer/dedupe';
 import { AnalyticMetric, CombatStats, estimateMetric, TargetStats } from 'src/app/optimizer/analytic-scorer';
+import { meanStdError } from 'src/app/optimizer/statistics';
 import { Lookup } from 'src/shared/utils/lookup';
 import {
     CandidateProvider,
@@ -119,6 +121,37 @@ export function getSelectedTarget(): OptimizeTarget | undefined {
  * same plotted metric the UI uses (`Simulation.getBarValue`).
  */
 export class GameScorer implements Scorer {
+    /**
+     * @param batches split each evaluation's trials into this many independent sub-runs (in ONE
+     * worker call) to estimate the metric's standard error for the optimizer's significance gate.
+     * The heavy save decode is paid once per evaluation instead of once per sub-run (as the old
+     * app-side `BatchingScorer` did). ≤1 disables batching (single run, no stderr).
+     * @param minTrialsPerBatch never split so finely that a batch has fewer than this many trials.
+     * @param pool when supplied, a pool of N workers used by {@link evaluateBatch} to sim a
+     * dimension's candidates concurrently. Without it the scorer exposes no batch method and the
+     * optimizer evaluates candidates one at a time through the single shared worker (unchanged).
+     */
+    constructor(
+        private readonly batches = 5,
+        private readonly minTrialsPerBatch = 5,
+        private readonly pool?: WorkerPool
+    ) {
+        // Only advertise the parallel path when there's a pool to run it on — the optimizer keys off
+        // the method's presence, so a pool-less GameScorer stays on the verified serial path.
+        if (pool) {
+            this.evaluateBatch = this.runBatch.bind(this);
+        }
+    }
+
+    /** Present only when constructed with a worker pool (see {@link runBatch}). */
+    public evaluateBatch?: (
+        setups: unknown[],
+        target: OptimizeTarget,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ) => Promise<Evaluation[]>;
+
     public async evaluate(
         target: OptimizeTarget,
         trials: number,
@@ -134,13 +167,40 @@ export class GameScorer implements Scorer {
             return this.evaluateSlayerTask(taskId, trials, ticks, deathAbortThreshold);
         }
 
-        const data = await this.runSim(target.monsterId, target.entityId, trials, ticks, deathAbortThreshold);
-        if (!data) {
+        const batches = this.resolveBatches(trials);
+        const datas = await this.runSim(target.monsterId, target.entityId, trials, ticks, deathAbortThreshold, batches);
+        if (!datas) {
             return { metric: NaN, deathRate: Infinity, success: false };
         }
 
-        const metric = Global.simulation.getBarValue(true, data);
-        return { metric, deathRate: data.deathRate ?? 0, success: !Number.isNaN(metric) };
+        return this.foldBatches(datas);
+    }
+
+    /** How many batches actually fit: need ≥2 for a standard error, each ≥ minTrialsPerBatch. */
+    private resolveBatches(trials: number): number {
+        if (this.batches <= 1) {
+            return 1;
+        }
+        const b = Math.min(this.batches, Math.floor(trials / this.minTrialsPerBatch));
+        return b >= 2 ? b : 1;
+    }
+
+    /**
+     * Fold per-batch sim results into one {@link Evaluation}: the metric is the mean of the per-batch
+     * plotted values, with the batch-means standard error (undefined for a single batch). The death
+     * rate is the mean of the per-batch rates (equal-size batches ⇒ the pooled rate).
+     */
+    private foldBatches(datas: SimulationData[]): Evaluation {
+        const metrics = datas.map(data => Global.simulation.getBarValue(true, data)).filter(m => Number.isFinite(m));
+        if (metrics.length === 0) {
+            return { metric: NaN, deathRate: Infinity, success: false };
+        }
+        const deathRate = datas.reduce((sum, data) => sum + (data.deathRate ?? 0), 0) / datas.length;
+        if (metrics.length < 2) {
+            return { metric: metrics[0], deathRate, success: true };
+        }
+        const { mean, stdError } = meanStdError(metrics);
+        return { metric: mean, deathRate, success: true, stdError: Number.isFinite(stdError) ? stdError : undefined };
     }
 
     /**
@@ -164,8 +224,11 @@ export class GameScorer implements Scorer {
         const dataByMonster = new Map<string, SimulationData>();
         let anySuccess = false;
         for (const monster of monsters) {
-            // entityId undefined => the worker fights the plain monster, exactly as the Simulate queue does.
-            const data = await this.runSim(monster.id, undefined, trials, ticks, deathAbortThreshold);
+            // entityId undefined => the worker fights the plain monster, exactly as the Simulate queue
+            // does. Slayer-task scoring already sims many monsters, so it isn't batched (batches=1):
+            // the significance gate simply falls back to the fixed minImprovement margin here.
+            const datas = await this.runSim(monster.id, undefined, trials, ticks, deathAbortThreshold);
+            const data = datas?.[0];
             if (data) {
                 anySuccess = true;
             }
@@ -204,8 +267,9 @@ export class GameScorer implements Scorer {
         entityId: string | undefined,
         trials: number,
         ticks: number,
-        deathAbortThreshold?: number
-    ): Promise<SimulationData | undefined> {
+        deathAbortThreshold?: number,
+        batches = 1
+    ): Promise<SimulationData[] | undefined> {
         const saveString = Global.game.generateSaveStringSimple();
 
         let response: SimulateResponse;
@@ -218,35 +282,116 @@ export class GameScorer implements Scorer {
                 entityId: entityId as string,
                 trials,
                 maxTicks: ticks,
-                deathAbortThreshold
+                deathAbortThreshold,
+                batches: batches > 1 ? batches : undefined
             });
         } catch (error) {
             Global.logger.warn('Optimizer sim threw', { monsterId, entityId, error });
             return undefined;
         }
 
-        const data = response?.result as SimulationData | undefined;
-        if (!data || !data.simSuccess) {
+        return this.responseToDatas(response, monsterId, entityId, trials, ticks);
+    }
+
+    /**
+     * Turn a worker {@link SimulateResponse} into the per-batch {@link SimulationData} the scorer
+     * folds. Filters out failed sub-runs (logging the first failure reason), and back-fills the
+     * realm id realmed plot types need. Shared by the serial ({@link runSim}) and parallel
+     * ({@link evaluateBatch}) paths. Returns `undefined` if every sub-run failed.
+     */
+    private responseToDatas(
+        response: SimulateResponse | undefined,
+        monsterId: string,
+        entityId: string | undefined,
+        trials: number,
+        ticks: number
+    ): SimulationData[] | undefined {
+        // batchResults carries one entry per sub-run (variance); a single run has just `result`.
+        const raw = (response?.batchResults?.length ? response.batchResults : [response?.result]) as (
+            | SimulationData
+            | undefined
+        )[];
+        const datas = raw.filter((data): data is SimulationData => !!data && data.simSuccess);
+        if (datas.length === 0) {
             Global.logger.warn('Optimizer sim failed', {
                 monsterId,
                 entityId,
                 trials,
                 ticks,
-                reason: data?.reason ?? 'no result returned'
+                reason: (response?.result as SimulationData | undefined)?.reason ?? 'no result returned'
             });
             return undefined;
         }
 
         // Realmed plot types (XP, etc.) need data.realmId. The worker already sets it from the
-        // monster's area realm; derive it the same way if it's ever missing.
-        if (data.realmId === undefined) {
+        // monster's area realm; derive it the same way if it's ever missing (once, shared by batches).
+        if (datas.some(data => data.realmId === undefined)) {
             const monster = Global.game.monsters.getObjectByID(monsterId);
-            if (monster) {
-                data.realmId = Global.game.getMonsterArea(monster).realm.id;
+            const realmId = monster ? Global.game.getMonsterArea(monster).realm.id : undefined;
+            for (const data of datas) {
+                if (data.realmId === undefined) {
+                    data.realmId = realmId;
+                }
             }
         }
 
-        return data;
+        return datas;
+    }
+
+    /**
+     * Parallel candidate evaluation (§2d): score several setups at once across the worker {@link pool}.
+     * Each setup is a `Settings` snapshot; it's imported and serialized to a save string on the main
+     * thread (serial + cheap, no sim), then all save strings are simmed CONCURRENTLY across the pool.
+     * Results are folded exactly like {@link evaluate}, so a candidate scores identically whether it
+     * ran serially or in a batch. Bound to {@link evaluateBatch} only when a pool is present.
+     *
+     * Slayer-task targets aren't single-entity sims (they average many monsters), so they fall back
+     * to serial evaluation here — the parallelism win is on the common single-monster case.
+     */
+    private async runBatch(
+        setups: unknown[],
+        target: OptimizeTarget,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ): Promise<Evaluation[]> {
+        if (!this.pool || slayerTaskTargetId(target)) {
+            const out: Evaluation[] = [];
+            for (const setup of setups) {
+                SettingsController.import(setup as Settings);
+                out.push(await this.evaluate(target, trials, ticks, deathAbortThreshold));
+            }
+            return out;
+        }
+
+        const batches = this.resolveBatches(trials);
+        // Import each setup and capture its save string (mutates the shared sim world, so this must be
+        // sequential — but it's cheap). The heavy work is the sims, which the pool runs in parallel.
+        const requests: SimulateRequest[] = setups.map(setup => {
+            SettingsController.import(setup as Settings);
+            return {
+                saveString: Global.game.generateSaveStringSimple(),
+                monsterId: target.monsterId,
+                entityId: target.entityId as string,
+                trials,
+                maxTicks: ticks,
+                deathAbortThreshold,
+                batches: batches > 1 ? batches : undefined
+            };
+        });
+
+        let responses: SimulateResponse[];
+        try {
+            responses = await this.pool.simulateMany(requests);
+        } catch (error) {
+            Global.logger.warn('Optimizer parallel sim threw', { error });
+            return setups.map(() => ({ metric: NaN, deathRate: Infinity, success: false }));
+        }
+
+        return responses.map(response => {
+            const datas = this.responseToDatas(response, target.monsterId, target.entityId, trials, ticks);
+            return datas ? this.foldBatches(datas) : { metric: NaN, deathRate: Infinity, success: false };
+        });
     }
 
     public isMaximize(): boolean {
