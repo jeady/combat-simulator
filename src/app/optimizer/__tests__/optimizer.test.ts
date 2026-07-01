@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
-import { OptimizeProgress, OptimizeResult } from 'src/app/optimizer/types';
+import { OptimizeProgress, OptimizeResult, OptimizeTarget } from 'src/app/optimizer/types';
 import { cancelToken, FakeApplier, FakeCandidateProvider, FakeScorer, FakeWorld, TARGET } from 'src/app/optimizer/__tests__/fakes';
 
 function build(world: FakeWorld, scorer = new FakeScorer(world)) {
