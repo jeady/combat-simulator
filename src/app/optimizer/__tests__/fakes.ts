@@ -134,6 +134,8 @@ export class FakeScorer implements Scorer {
     public lastDeathAbortThreshold: number | undefined = undefined;
     /** Every death-abort threshold seen, in call order (search evals + the final re-score). */
     public readonly deathAbortThresholds: (number | undefined)[] = [];
+    /** Every trial count seen, in call order (to observe adaptive screen-vs-confirm fidelity). */
+    public readonly trialsSeen: number[] = [];
     constructor(private readonly world: FakeWorld, private readonly opts: FakeScorerOptions = {}) {}
 
     public async evaluate(
@@ -144,6 +146,7 @@ export class FakeScorer implements Scorer {
     ): Promise<Evaluation> {
         this.evaluations++;
         this.lastTrials = trials;
+        this.trialsSeen.push(trials);
         this.lastDeathAbortThreshold = deathAbortThreshold;
         this.deathAbortThresholds.push(deathAbortThreshold);
         this.opts.onEvaluate?.(this.evaluations);

@@ -310,6 +310,56 @@ describe('CoordinateAscentOptimizer', () => {
         expect(result.bestMetric).toBe(-50);
     });
 
+    describe('adaptive trials (§2e screen→confirm)', () => {
+        // 5 weapon candidates; only the best few should reach full trials.
+        const world = () =>
+            new FakeWorld(
+                ['weapon'],
+                [
+                    { id: 'w1', slotId: 'weapon', power: 1 },
+                    { id: 'w2', slotId: 'weapon', power: 2 },
+                    { id: 'w3', slotId: 'weapon', power: 3 },
+                    { id: 'w4', slotId: 'weapon', power: 9 }, // the winner
+                    { id: 'w5', slotId: 'weapon', power: 4 }
+                ],
+                { weapon: 'w1' }
+            );
+
+        it('still finds the true optimum when screening', async () => {
+            const { optimizer } = build(world());
+            const result = await optimizer.run(TARGET, { searchTrials: 100, screenTrials: 10, screenKeep: 2, finalTrials: 500 });
+            expect(setup(result).get('weapon')).toBe('w4');
+        });
+
+        it('screens losers cheaply and confirms only the top screenKeep at full trials', async () => {
+            const { optimizer, scorer } = build(world());
+            // maxPasses 1 so we count exactly one screen→confirm pass over the slot (a 2nd
+            // convergence pass would re-screen it and double these counts).
+            await optimizer.run(TARGET, { searchTrials: 100, screenTrials: 10, screenKeep: 2, finalTrials: 500, maxPasses: 1 });
+
+            const screens = scorer.trialsSeen.filter(t => t === 10).length;
+            const fullTrialEvals = scorer.trialsSeen.filter(t => t === 100).length;
+            // 4 non-current candidates screened (w2..w5); w1 is current and skipped.
+            expect(screens).toBe(4);
+            // Full-trial (100) evals = the baseline (1) + only screenKeep (2) confirmed candidates.
+            expect(fullTrialEvals).toBe(3);
+            // And the final re-score used the full finalTrials.
+            expect(scorer.trialsSeen).toContain(500);
+        });
+
+        it('does not screen when candidates are within screenKeep (no benefit)', async () => {
+            const small = new FakeWorld(
+                ['weapon'],
+                [{ id: 'w1', slotId: 'weapon', power: 1 }, { id: 'w2', slotId: 'weapon', power: 5 }],
+                { weapon: 'w1' }
+            );
+            const { optimizer, scorer } = build(small);
+            await optimizer.run(TARGET, { searchTrials: 100, screenTrials: 10, screenKeep: 3 });
+            // 2 candidates ≤ screenKeep(3): no screen pass, so no 10-trial evaluations.
+            expect(scorer.trialsSeen).not.toContain(10);
+        });
+    });
+
     it('emits progress updates', async () => {
         const world = new FakeWorld(
             ['weapon'],

@@ -11,6 +11,7 @@ import {
     DEFAULT_OPTIONS,
     Dimension,
     DimensionChange,
+    DimensionChoice,
     Evaluation,
     OptimizeOptions,
     OptimizeResult,
@@ -51,6 +52,9 @@ export class CoordinateAscentOptimizer {
         // (deathRateThreshold 0 => abort on the first death.) Infinity disables the abort entirely.
         const searchAbortThreshold = opts.earlyStopOnDeath
             ? Math.floor(opts.deathRateThreshold * opts.searchTrials) + 1
+            : Infinity;
+        const screenAbortThreshold = opts.earlyStopOnDeath
+            ? Math.floor(opts.deathRateThreshold * opts.screenTrials) + 1
             : Infinity;
 
         try {
@@ -104,29 +108,52 @@ export class CoordinateAscentOptimizer {
                     let bestChoice = currentChoice;
                     let bestDimScore = bestScore;
 
-                    for (const choice of dim.getCandidates()) {
-                        if (dim.equals(choice, currentChoice)) {
-                            continue; // "leave as-is" is already represented by bestScore
-                        }
+                    // Candidates other than "leave as-is" (already represented by bestScore).
+                    const candidates = dim.getCandidates().filter(c => !dim.equals(c, currentChoice));
+
+                    // Evaluate one candidate on top of the incumbent at a given fidelity.
+                    const evalChoice = async (choice: DimensionChoice, trials: number, abort: number) => {
                         // Reset to the incumbent so each candidate is judged in isolation
                         // (also handles equipment 2H/shield/ammo coupling deterministically).
                         this.applier.restore(incumbentSnap);
                         dim.applyChoice(choice);
-                        const evaluation = await this.scorer.evaluate(
-                            target,
-                            opts.searchTrials,
-                            opts.searchTicks,
-                            searchAbortThreshold
-                        );
+                        const evaluation = await this.scorer.evaluate(target, trials, opts.searchTicks, abort);
                         evaluations++;
-                        const score = this.toScore(evaluation, opts.deathRateThreshold);
-                        if (this.better(score, bestDimScore, opts.minImprovement)) {
-                            bestDimScore = score;
-                            bestChoice = choice;
+                        return this.toScore(evaluation, opts.deathRateThreshold);
+                    };
+
+                    // Adaptive trials (§2e): screen all candidates cheaply, then confirm only the best
+                    // `screenKeep` at full fidelity. Skipped (confirm everything) when disabled or when
+                    // there aren't enough candidates to be worth a screen pass.
+                    let toConfirm = candidates;
+                    if (
+                        opts.screenTrials > 0 &&
+                        opts.screenTrials < opts.searchTrials &&
+                        opts.screenKeep > 0 &&
+                        candidates.length > opts.screenKeep
+                    ) {
+                        const screened: { choice: DimensionChoice; score: Score }[] = [];
+                        for (const choice of candidates) {
+                            screened.push({ choice, score: await evalChoice(choice, opts.screenTrials, screenAbortThreshold) });
+                            if (cancel?.cancelled) {
+                                cancelled = true;
+                                break;
+                            }
                         }
+                        // Best-first by the same ordering as the accept test, then keep the top K.
+                        screened.sort((a, b) => (this.better(a.score, b.score, 0) ? -1 : this.better(b.score, a.score, 0) ? 1 : 0));
+                        toConfirm = screened.slice(0, opts.screenKeep).map(s => s.choice);
+                    }
+
+                    for (const choice of toConfirm) {
                         if (cancel?.cancelled) {
                             cancelled = true;
                             break;
+                        }
+                        const score = await evalChoice(choice, opts.searchTrials, searchAbortThreshold);
+                        if (this.better(score, bestDimScore, opts.minImprovement)) {
+                            bestDimScore = score;
+                            bestChoice = choice;
                         }
                     }
 

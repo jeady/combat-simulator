@@ -133,6 +133,16 @@ export interface OptimizeOptions {
      * `docs/auto-optimize-search.md` §2a.
      */
     earlyStopOnDeath: boolean;
+    /**
+     * Adaptive trials (§2e). When > 0, a slot's candidates are first SCREENED at this (low) trial
+     * count, then only the best `screenKeep` are CONFIRMED at full `searchTrials`. Clear losers are
+     * dropped after a cheap screen instead of paying a full evaluation each. 0 (default) = off (every
+     * candidate is evaluated once at `searchTrials`). Only screens when a slot has more than
+     * `screenKeep` candidates and `screenTrials < searchTrials`.
+     */
+    screenTrials: number;
+    /** How many screened candidates advance to the full-trial confirm pass. Default 3. */
+    screenKeep: number;
 }
 
 export const DEFAULT_OPTIONS: OptimizeOptions = {
@@ -143,7 +153,9 @@ export const DEFAULT_OPTIONS: OptimizeOptions = {
     maxPasses: 3,
     deathRateThreshold: 0,
     minImprovement: 0,
-    earlyStopOnDeath: true
+    earlyStopOnDeath: true,
+    screenTrials: 0,
+    screenKeep: 3
 };
 
 export type OptimizePhase = 'searching' | 'finalizing' | 'done' | 'cancelled' | 'aborted' | 'error';
