@@ -745,9 +745,141 @@ function prayerDimension(): Dimension {
 }
 
 /**
+ * Magic (Alt. Magic) skill level gates every spell's unlock; abyssal attack spells use the abyssal
+ * level track. A spell that requires an equipped item is only unlocked while that item is equipped.
+ * Mirrors the game's own `_isUnlocked` (see the Spells config page).
+ */
+function isSpellUnlocked(spell: any, abyssal: boolean): boolean {
+    const player = Global.game.combat.player;
+    const magicId = Global.game.altMagic.id;
+    const levelOk = abyssal
+        ? player.skillAbyssalLevel.get(magicId) >= spell.abyssalLevel
+        : player.skillLevel.get(magicId) >= spell.level;
+    return levelOk && (spell.requiredItem === undefined || player.equipment.checkForItem(spell.requiredItem));
+}
+
+/**
+ * An attack spell is a legal choice only if unlocked AND either its required item is equipped or its
+ * spellbook works with the player's *current* damage type (weapon-dependent — so candidates are
+ * re-read as the search changes the weapon). Mirrors the game's `_canEquip`/`_isUnlocked`.
+ */
+function isUsableAttackSpell(spell: any): boolean {
+    const abyssal = spell.spellbook.id === 'melvorItA:Abyssal';
+    if (!isSpellUnlocked(spell, abyssal)) {
+        return false;
+    }
+    // isSpellUnlocked already guaranteed the required item (if any) is equipped, so a spell WITH a
+    // required item is always usable; one without needs a damage-type-compatible spellbook.
+    return (
+        spell.requiredItem !== undefined ||
+        spell.spellbook.canUseWithDamageType(Global.game.combat.player.damageType)
+    );
+}
+
+/** Human-readable spell name for an id (falls back to the raw id, or `none` for the empty selection). */
+function spellName(id: string, registry: any, none: string): string {
+    return id ? registry.getObjectByID(id)?.name ?? id : none;
+}
+
+/**
+ * Attack spell as ONE dimension over the usable attack spells. Only meaningful when the setup casts
+ * Magic, so on a melee/ranged build (`attackType !== 'magic'`) it collapses to just the current
+ * selection — no candidates, no wasted sims. Candidates are state-dependent (usable spells depend on
+ * the equipped weapon's damage type), which the optimizer re-reads each pass. There is always an
+ * attack spell selected (no "none"). Applied via the verified `SettingsController.import` path.
+ */
+function attackSpellDimension(): Dimension {
+    return settingsDimension(
+        'spell-attack',
+        'Attack Spell',
+        settings => settings.spells.attack,
+        (settings, value) => (settings.spells.attack = (value as string) ?? ''),
+        () => {
+            const player = Global.game.combat.player;
+            const current = SettingsController.export().spells.attack;
+            // Attack spells only fire on Magic; leave the selection untouched otherwise.
+            if (player.attackType !== 'magic') {
+                return [current];
+            }
+            const ids = Global.game.attackSpells.allObjects.filter(isUsableAttackSpell).map(spell => spell.id);
+            // Keep "leave as-is" reachable even if the current spell somehow fails the usable filter.
+            return ids.includes(current) ? ids : [current, ...ids];
+        },
+        choice => spellName(choice as string, Global.game.attackSpells, 'default spell')
+    );
+}
+
+/**
+ * Curse and Aurora share a shape: an optional single spell (or none), gated on the character being
+ * able to cast that class (`canCurse`/`canAurora` — magic-dependent) and the current attack spellbook
+ * permitting it (`allowCurses`/`allowAuroras`; e.g. Ancient magic forbids curses). When it can't be
+ * cast, the dimension collapses to the current selection so the search wastes no sims. Unlock mirrors
+ * the game's `_isUnlocked`. Applied via the verified `SettingsController.import` path.
+ */
+function optionalSpellDimension(
+    id: string,
+    label: string,
+    registry: any,
+    get: (settings: Settings) => string,
+    set: (settings: Settings, value: string) => void,
+    canCast: () => boolean,
+    bookAllows: (book: any) => boolean,
+    none: string
+): Dimension {
+    return settingsDimension(
+        id,
+        label,
+        get,
+        (settings, value) => set(settings, (value as string) ?? ''),
+        () => {
+            const player = Global.game.combat.player;
+            const current = get(SettingsController.export());
+            if (!canCast() || !bookAllows(player.spellSelection.attack?.spellbook)) {
+                return [current || ''];
+            }
+            const ids = registry.allObjects
+                .filter((spell: any) => isSpellUnlocked(spell, false))
+                .map((spell: any) => spell.id);
+            const withNone = ['', ...ids]; // '' is the always-available "no spell" option
+            return withNone.includes(current) ? withNone : [current, ...withNone];
+        },
+        choice => spellName(choice as string, registry, none)
+    );
+}
+
+/** Curse dimension: the active curse (or none). */
+function curseSpellDimension(): Dimension {
+    return optionalSpellDimension(
+        'spell-curse',
+        'Curse',
+        Global.game.curseSpells,
+        settings => settings.spells.curse,
+        (settings, value) => (settings.spells.curse = value),
+        () => Global.game.combat.player.canCurse,
+        book => book?.allowCurses !== false,
+        'no curse'
+    );
+}
+
+/** Aurora dimension: the active aurora (or none). */
+function auroraSpellDimension(): Dimension {
+    return optionalSpellDimension(
+        'spell-aurora',
+        'Aurora',
+        Global.game.auroraSpells,
+        settings => settings.spells.aurora,
+        (settings, value) => (settings.spells.aurora = value),
+        () => Global.game.combat.player.canAurora,
+        book => book?.allowAuroras !== false,
+        'no aurora'
+    );
+}
+
+/**
  * Build the optimizer's search dimensions for the live game: equipment (each slot) plus the enabled
- * consumable dimensions (food, potion, prayers). The same `applier` is passed to the optimizer as
- * its SetupApplier. Non-equipment dimensions reuse the verified `SettingsController.import` path.
+ * consumable dimensions (food, potion, prayers) and spell dimensions (attack spell, curse, aurora).
+ * The same `applier` is passed to the optimizer as its SetupApplier. Non-equipment dimensions reuse
+ * the verified `SettingsController.import` path.
  *
  * `summonSynergy` (default FALSE — regression-safe) swaps the two per-slot summon dimensions for the
  * single compound {@link summonSynergyDimension}, excluding the summon slots from
@@ -763,6 +895,9 @@ export function buildDimensions(
         food?: boolean;
         potion?: boolean;
         prayers?: boolean;
+        attackSpell?: boolean;
+        curse?: boolean;
+        aurora?: boolean;
         summonSynergy?: boolean;
         allowEmpty?: boolean;
         /** Analytic two-tier pre-rank: keep only the top-K candidates per slot by surrogate (§2b). 0/undefined = off. */
@@ -804,6 +939,15 @@ export function buildDimensions(
     }
     if (options.prayers ?? true) {
         dims.push(prayerDimension());
+    }
+    if (options.attackSpell ?? true) {
+        dims.push(attackSpellDimension());
+    }
+    if (options.curse ?? true) {
+        dims.push(curseSpellDimension());
+    }
+    if (options.aurora ?? true) {
+        dims.push(auroraSpellDimension());
     }
     return dims;
 }

@@ -84,7 +84,7 @@ function equipmentIcon(slotId: string, itemId: string | undefined, classes: stri
     return iconCell(slot?.emptyMedia ?? '', slot?.localID, ['mcs-ao-icon-empty', ...classes]);
 }
 
-/** Resolve an id to its media + display name, trying the item registry then the prayer registry. */
+/** Resolve an id to its media + display name, trying the item, prayer, then spell registries. */
 function resolveEntity(id: string): { media: string; name: string } | undefined {
     const item = Global.game.items.getObjectByID(id);
     if (item) {
@@ -93,6 +93,14 @@ function resolveEntity(id: string): { media: string; name: string } | undefined 
     const prayer = Global.game.prayers.getObjectByID(id);
     if (prayer) {
         return { media: prayer.media, name: prayer.name };
+    }
+    // Spell dimensions (attack spell / curse / aurora) — ids live in the spell registries, not items.
+    const spell =
+        Global.game.attackSpells.getObjectByID(id) ??
+        Global.game.curseSpells.getObjectByID(id) ??
+        Global.game.auroraSpells.getObjectByID(id);
+    if (spell) {
+        return { media: spell.media, name: spell.name };
     }
     return undefined;
 }
