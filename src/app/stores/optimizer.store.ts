@@ -1,5 +1,6 @@
 import { BaseStore } from './_base.store';
 import { OptimizeProgress, OptimizeResult } from 'src/app/optimizer/types';
+import { AttackTypeConstraint } from 'src/app/optimizer/weapon-rules';
 
 export interface OptimizerState {
     isRunning: boolean;
@@ -28,6 +29,13 @@ export interface OptimizerState {
      * of the game data, so higher counts cost more memory + a one-time startup.
      */
     workerCount: number;
+    /**
+     * Constrain the weapon search to an attack type. `current` (default) keeps the search on the
+     * character's configured attack type — so optimizing a magic build won't recommend a melee weapon
+     * — while `any` searches across all types. Also gates the Quiver slot (ammo only matters to a
+     * ranged weapon). One of: 'current' | 'any' | 'melee' | 'ranged' | 'magic'.
+     */
+    attackTypeConstraint: AttackTypeConstraint;
     progress?: OptimizeProgress;
     result?: OptimizeResult;
 }
@@ -40,7 +48,8 @@ export class OptimizerStore extends BaseStore<OptimizerState> {
             searchTicks: 1000,
             fastSearch: true,
             preRankTopK: 0,
-            workerCount: 0
+            workerCount: 0,
+            attackTypeConstraint: 'current'
         });
     }
 }

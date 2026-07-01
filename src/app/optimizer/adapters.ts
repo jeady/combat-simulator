@@ -14,6 +14,12 @@ import { equipmentDimensions } from 'src/app/optimizer/dimensions';
 import { enumerateSummonChoices, normalizeSummonChoice, SummonChoice, summonChoicesEqual } from 'src/app/optimizer/synergy';
 import { PreRankingCandidateProvider } from 'src/app/optimizer/prerank';
 import { dedupeBySignature } from 'src/app/optimizer/dedupe';
+import {
+    ammoUsableWithWeapon,
+    AttackTypeConstraint,
+    resolveAttackTypeConstraint,
+    weaponAllowedByAttackType
+} from 'src/app/optimizer/weapon-rules';
 import { AnalyticMetric, CombatStats, estimateMetric, TargetStats } from 'src/app/optimizer/analytic-scorer';
 import { meanStdError } from 'src/app/optimizer/statistics';
 import { Lookup } from 'src/shared/utils/lookup';
@@ -30,6 +36,10 @@ import {
 
 const EMPTY_ITEM = 'melvorD:Empty_Equipment';
 const DEBUG_ITEM = 'melvorD:DEBUG_ITEM';
+
+/** The weapon and ammo (quiver) equipment slots — coupled: ammo is only useful to a ranged weapon. */
+const WEAPON_SLOT = 'melvorD:Weapon';
+const QUIVER_SLOT = 'melvorD:Quiver';
 
 /** The two equipment slots that hold summon tablets — searched together by the compound synergy dim. */
 const SUMMON_SLOT_1 = 'melvorD:Summon1';
@@ -401,13 +411,29 @@ export class GameScorer implements Scorer {
 
 /** Owned + valid-for-slot + currently-equippable candidate items for a slot. */
 export class GameCandidateProvider implements CandidateProvider {
-    constructor(private readonly ownedOnly = true) {}
+    constructor(
+        private readonly ownedOnly = true,
+        /**
+         * Which attack type the weapon search is constrained to. Default `current` keeps the search on
+         * the character's configured attack type (so a magic build isn't handed a melee weapon); `any`
+         * searches every type. Also gates the Quiver slot (ammo is only relevant to a ranged weapon).
+         */
+        private readonly attackTypeConstraint: AttackTypeConstraint = 'current'
+    ) {}
 
     public getCandidates(slotId: string): string[] {
         const slot = Global.game.equipmentSlots.getObjectByID(slotId);
         if (!slot) {
             return [];
         }
+
+        const player = Global.game.combat.player;
+        // Attack-type target the weapon search must stay within (undefined = unconstrained).
+        const attackTypeTarget = resolveAttackTypeConstraint(this.attackTypeConstraint, player.attackType);
+        // The equipped weapon drives whether ammo is relevant and which ammo type fits.
+        const weapon = player.equipment.getItemInSlot(WEAPON_SLOT) as any;
+        const weaponIsRanged = !!weapon && weapon.id !== EMPTY_ITEM && weapon.attackType === 'ranged';
+        const weaponAmmoRequired = weaponIsRanged ? weapon.ammoTypeRequired : undefined;
 
         const items = Global.game.items.equipment.filter(item => {
             if (item.id === EMPTY_ITEM || item.id === DEBUG_ITEM || item.golbinRaidExclusive) {
@@ -421,6 +447,17 @@ export class GameCandidateProvider implements CandidateProvider {
                 return false;
             }
             if (this.ownedOnly && !this.isOwned(item.id)) {
+                return false;
+            }
+            // Keep the weapon search on the chosen attack type (a weapon has a string attackType;
+            // non-weapons don't, so they're never filtered here).
+            if (!weaponAllowedByAttackType((item as any).attackType, attackTypeTarget)) {
+                return false;
+            }
+            // Ammo is only useful to a matching ranged weapon — drop arrows/bolts for a melee or magic
+            // build, and drop the wrong ammo type for the equipped bow/crossbow. Passive quiver items
+            // (no ammoType) are unaffected.
+            if (slotId === QUIVER_SLOT && !ammoUsableWithWeapon((item as any).ammoType, weaponIsRanged, weaponAmmoRequired)) {
                 return false;
             }
             return true;
@@ -598,6 +635,66 @@ export class GameLoadoutApplier implements LoadoutApplier {
             return;
         }
         Global.game.combat.player.equipItem(item, 0, slot, 1, true);
+        // A ranged weapon can't attack without compatible ammo, so equipping one that leaves the
+        // quiver empty/incompatible would sim as a dud. Auto-fit ammo so the candidate is evaluated
+        // fairly (the Quiver dimension then optimizes it). No-op for melee/magic weapons + non-weapons.
+        if (slotId === WEAPON_SLOT) {
+            this.ensureCompatibleAmmo();
+        }
+    }
+
+    /**
+     * If a ranged weapon that needs ammo is equipped but the quiver has none (or the wrong type),
+     * equip the best owned compatible ammo so the bow/crossbow can actually attack in the sim. Mirrors
+     * what a player must do by hand; the optimizer's Quiver dimension refines the choice afterwards.
+     */
+    private ensureCompatibleAmmo(): void {
+        const player = Global.game.combat.player;
+        const weapon = player.equipment.getItemInSlot(WEAPON_SLOT) as any;
+        if (!weapon || weapon.id === EMPTY_ITEM || weapon.attackType !== 'ranged' || weapon.ammoTypeRequired == null) {
+            return;
+        }
+        const quiver = player.equipment.getItemInSlot(QUIVER_SLOT) as any;
+        if (quiver && quiver.id !== EMPTY_ITEM && quiver.ammoType === weapon.ammoTypeRequired) {
+            return; // already compatible
+        }
+        const ammo = this.bestCompatibleAmmo(weapon.ammoTypeRequired);
+        const quiverSlot = Global.game.equipmentSlots.getObjectByID(QUIVER_SLOT);
+        if (ammo && quiverSlot) {
+            player.equipItem(ammo, 0, quiverSlot, 1, true);
+        }
+    }
+
+    /** Highest-ranged-power owned ammo of the required type that fits the quiver, or undefined. */
+    private bestCompatibleAmmo(ammoTypeRequired: number): any {
+        let best: any;
+        let bestScore = -Infinity;
+        for (const item of Global.game.items.equipment.allObjects) {
+            const ammo = item as any;
+            if (ammo.ammoType !== ammoTypeRequired) {
+                continue;
+            }
+            if (!item.validSlots.some(valid => valid.id === QUIVER_SLOT)) {
+                continue;
+            }
+            if (!item.isModded && !Global.game.checkRequirements(item.equipRequirements, false)) {
+                continue;
+            }
+            if (!isItemOwned(item.id)) {
+                continue;
+            }
+            let score = 0;
+            for (const stat of item.equipmentStats ?? []) {
+                if (stat.key === 'rangedStrengthBonus' || stat.key === 'rangedAttackBonus') {
+                    score += stat.value;
+                }
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                best = item;
+            }
+        }
+        return best;
     }
 }
 

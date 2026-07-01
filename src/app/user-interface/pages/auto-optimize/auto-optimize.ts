@@ -7,6 +7,7 @@ import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
 import { MemoizingScorer, stableStringify } from 'src/app/optimizer/cache';
 import { WorkerPool } from 'src/app/optimizer/worker-pool';
 import { createWorkerPool } from 'src/app/optimizer/worker-pool-factory';
+import { AttackTypeConstraint } from 'src/app/optimizer/weapon-rules';
 import {
     GameCandidateProvider,
     GameLoadoutApplier,
@@ -73,6 +74,7 @@ export class AutoOptimizePage extends HTMLElement {
     private readonly _objective: HTMLDivElement;
     private readonly _searchTrials: HTMLInputElement;
     private readonly _fastSearch: HTMLInputElement;
+    private readonly _attackType: HTMLSelectElement;
     private readonly _workers: HTMLInputElement;
     private readonly _run: HTMLButtonElement;
     private readonly _apply: HTMLButtonElement;
@@ -136,6 +138,7 @@ export class AutoOptimizePage extends HTMLElement {
         this._objective = getElementFromFragment(this._content, 'mcs-auto-optimize-objective', 'div');
         this._searchTrials = getElementFromFragment(this._content, 'mcs-auto-optimize-search-trials', 'input');
         this._fastSearch = getElementFromFragment(this._content, 'mcs-auto-optimize-fast-search', 'input');
+        this._attackType = getElementFromFragment(this._content, 'mcs-auto-optimize-attack-type', 'select');
         this._workers = getElementFromFragment(this._content, 'mcs-auto-optimize-workers', 'input');
         this._run = getElementFromFragment(this._content, 'mcs-auto-optimize-run', 'button');
         this._apply = getElementFromFragment(this._content, 'mcs-auto-optimize-apply', 'button');
@@ -183,6 +186,9 @@ export class AutoOptimizePage extends HTMLElement {
         this._searchTrials.value = String(Global.stores.optimizer.state.searchTrials);
         this._fastSearch.checked = Global.stores.optimizer.state.fastSearch;
         this._fastSearch.onchange = () => Global.stores.optimizer.set({ fastSearch: this._fastSearch.checked });
+        this._attackType.value = Global.stores.optimizer.state.attackTypeConstraint;
+        this._attackType.onchange = () =>
+            Global.stores.optimizer.set({ attackTypeConstraint: this._attackType.value as AttackTypeConstraint });
         this._workers.value = String(Global.stores.optimizer.state.workerCount);
         this._workers.onchange = () =>
             Global.stores.optimizer.set({ workerCount: Math.max(0, parseInt(this._workers.value, 10) || 0) });
@@ -368,8 +374,9 @@ export class AutoOptimizePage extends HTMLElement {
         // ones are wrapped so the search never varies them. `preRankTopK` (default 0 = off) narrows
         // each equipment slot to its top-K analytic candidates before any real sim runs.
         const preRankTopK = Global.stores.optimizer.state.preRankTopK;
-        this._runDims = buildDimensions(applier, new GameCandidateProvider(true), { preRankTopK }).map(dim =>
-            this._lockedDims.has(dim.id) ? lockedDimension(dim) : dim
+        const attackTypeConstraint = Global.stores.optimizer.state.attackTypeConstraint;
+        this._runDims = buildDimensions(applier, new GameCandidateProvider(true, attackTypeConstraint), { preRankTopK }).map(
+            dim => (this._lockedDims.has(dim.id) ? lockedDimension(dim) : dim)
         );
         // Estimate total work up front (candidates × passes) to drive the progress bar + ETA.
         this._estimatedEvals = this._estimateEvals();
