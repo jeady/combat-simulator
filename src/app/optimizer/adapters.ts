@@ -7,6 +7,7 @@ import { Global } from 'src/app/global';
 import { SettingsController, Settings } from 'src/app/settings-controller';
 import { SimulationData } from 'src/app/simulation';
 import { PlotKey } from 'src/app/stores/plotter.store';
+import { ItemPool } from 'src/app/stores/optimizer.store';
 import { SimulateRequest, SimulateResponse } from 'src/shared/transport/type/simulate';
 import { WorkerPool } from 'src/app/optimizer/worker-pool';
 import { pruneDominated, statSignature, StatVector } from 'src/app/optimizer/prune';
@@ -411,8 +412,15 @@ export class GameScorer implements Scorer {
 
 /** Owned + valid-for-slot + currently-equippable candidate items for a slot. */
 export class GameCandidateProvider implements CandidateProvider {
+    /** Lazily-built set of item ids the character is a high enough skill level to craft (see craftableIds). */
+    private _craftable?: Set<string>;
+
     constructor(
-        private readonly ownedOnly = true,
+        /**
+         * Which items the search may draw from: `owned` (found), `craftable` (owned OR high enough
+         * skill level to craft), or `all` (every equippable item).
+         */
+        private readonly itemPool: ItemPool = 'owned',
         /**
          * Which attack type the weapon search is constrained to. Default `current` keeps the search on
          * the character's configured attack type (so a magic build isn't handed a melee weapon); `any`
@@ -446,7 +454,7 @@ export class GameCandidateProvider implements CandidateProvider {
             if (!item.isModded && !Global.game.checkRequirements(item.equipRequirements, false)) {
                 return false;
             }
-            if (this.ownedOnly && !this.isOwned(item.id)) {
+            if (!this.inPool(item.id)) {
                 return false;
             }
             // Keep the weapon search on the chosen attack type (a weapon has a string attackType;
@@ -510,10 +518,58 @@ export class GameCandidateProvider implements CandidateProvider {
         return stats;
     }
 
+    /** Is an item allowed by the configured pool (owned / owned+craftable / all)? */
+    private inPool(itemId: string): boolean {
+        switch (this.itemPool) {
+            case 'all':
+                return true;
+            case 'craftable':
+                return this.isOwned(itemId) || this.craftableIds().has(itemId);
+            case 'owned':
+            default:
+                return this.isOwned(itemId);
+        }
+    }
+
     /** Owned = ever found, per the live character (items are distinct instances across the two games). */
     private isOwned(itemId: string): boolean {
         const liveItem = Global.melvor.items.getObjectByID(itemId);
         return liveItem ? Global.melvor.stats.itemFindCount(liveItem) > 0 : false;
+    }
+
+    /**
+     * Item ids the LIVE character is a high enough skill level to craft, built once and cached. Walks
+     * every skill's recipes (Smithing/Fletching/Crafting/Runecrafting/Summoning all expose an `actions`
+     * registry of product-bearing recipes) and keeps each product whose level requirement is met. This
+     * is a skill-LEVEL check only (materials aren't considered, per the chosen pool semantics); items
+     * you can craft but can't yet equip are still dropped by the equip-requirement filter above.
+     */
+    private craftableIds(): Set<string> {
+        if (this._craftable) {
+            return this._craftable;
+        }
+        const craftable = new Set<string>();
+        for (const skill of Global.melvor.skills.allObjects as any[]) {
+            const recipes = skill.actions?.allObjects as any[] | undefined;
+            if (!recipes) {
+                continue;
+            }
+            const skillLevel = skill.level ?? 0;
+            const abyssalLevel = skill.abyssalLevel ?? 0;
+            for (const recipe of recipes) {
+                const product = recipe?.product;
+                if (!product || typeof recipe.level !== 'number') {
+                    continue;
+                }
+                const levelOk = skillLevel >= recipe.level;
+                const abyssalOk = !recipe.abyssalLevel || abyssalLevel >= recipe.abyssalLevel;
+                if (levelOk && abyssalOk) {
+                    craftable.add(product.id);
+                }
+            }
+        }
+        this._craftable = craftable;
+        return craftable;
     }
 }
 

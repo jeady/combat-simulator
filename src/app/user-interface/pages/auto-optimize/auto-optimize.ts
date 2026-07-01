@@ -8,6 +8,7 @@ import { MemoizingScorer, stableStringify } from 'src/app/optimizer/cache';
 import { WorkerPool } from 'src/app/optimizer/worker-pool';
 import { createWorkerPool } from 'src/app/optimizer/worker-pool-factory';
 import { AttackTypeConstraint } from 'src/app/optimizer/weapon-rules';
+import { ItemPool } from 'src/app/stores/optimizer.store';
 import {
     GameCandidateProvider,
     GameLoadoutApplier,
@@ -75,6 +76,7 @@ export class AutoOptimizePage extends HTMLElement {
     private readonly _searchTrials: HTMLInputElement;
     private readonly _fastSearch: HTMLInputElement;
     private readonly _attackType: HTMLSelectElement;
+    private readonly _itemPool: HTMLSelectElement;
     private readonly _workers: HTMLInputElement;
     private readonly _run: HTMLButtonElement;
     private readonly _apply: HTMLButtonElement;
@@ -139,6 +141,7 @@ export class AutoOptimizePage extends HTMLElement {
         this._searchTrials = getElementFromFragment(this._content, 'mcs-auto-optimize-search-trials', 'input');
         this._fastSearch = getElementFromFragment(this._content, 'mcs-auto-optimize-fast-search', 'input');
         this._attackType = getElementFromFragment(this._content, 'mcs-auto-optimize-attack-type', 'select');
+        this._itemPool = getElementFromFragment(this._content, 'mcs-auto-optimize-item-pool', 'select');
         this._workers = getElementFromFragment(this._content, 'mcs-auto-optimize-workers', 'input');
         this._run = getElementFromFragment(this._content, 'mcs-auto-optimize-run', 'button');
         this._apply = getElementFromFragment(this._content, 'mcs-auto-optimize-apply', 'button');
@@ -189,6 +192,8 @@ export class AutoOptimizePage extends HTMLElement {
         this._attackType.value = Global.stores.optimizer.state.attackTypeConstraint;
         this._attackType.onchange = () =>
             Global.stores.optimizer.set({ attackTypeConstraint: this._attackType.value as AttackTypeConstraint });
+        this._itemPool.value = Global.stores.optimizer.state.itemPool;
+        this._itemPool.onchange = () => Global.stores.optimizer.set({ itemPool: this._itemPool.value as ItemPool });
         this._workers.value = String(Global.stores.optimizer.state.workerCount);
         this._workers.onchange = () =>
             Global.stores.optimizer.set({ workerCount: Math.max(0, parseInt(this._workers.value, 10) || 0) });
@@ -259,7 +264,10 @@ export class AutoOptimizePage extends HTMLElement {
     /** Fresh dimensions reflecting the current config (for the lock panel + run). */
     private _buildDisplayDimensions(): Dimension[] {
         const applier = new GameLoadoutApplier();
-        return buildDimensions(applier, new GameCandidateProvider(true));
+        const { itemPool, attackTypeConstraint } = Global.stores.optimizer.state;
+        return buildDimensions(applier, new GameCandidateProvider(itemPool, attackTypeConstraint), {
+            ownedOnly: itemPool !== 'all'
+        });
     }
 
     /** Render the lock panel: one row per dimension with a "search this" checkbox + current icon. */
@@ -375,9 +383,14 @@ export class AutoOptimizePage extends HTMLElement {
         // each equipment slot to its top-K analytic candidates before any real sim runs.
         const preRankTopK = Global.stores.optimizer.state.preRankTopK;
         const attackTypeConstraint = Global.stores.optimizer.state.attackTypeConstraint;
-        this._runDims = buildDimensions(applier, new GameCandidateProvider(true, attackTypeConstraint), { preRankTopK }).map(
-            dim => (this._lockedDims.has(dim.id) ? lockedDimension(dim) : dim)
-        );
+        const itemPool = Global.stores.optimizer.state.itemPool;
+        // Consumables (food/potion/summons) follow the same pool at the coarse owned-vs-all level:
+        // 'owned' and 'craftable' keep them owned-only (craftability is a gear concept), 'all' opens
+        // them up. Equipment gets the full tri-state via the candidate provider.
+        this._runDims = buildDimensions(applier, new GameCandidateProvider(itemPool, attackTypeConstraint), {
+            preRankTopK,
+            ownedOnly: itemPool !== 'all'
+        }).map(dim => (this._lockedDims.has(dim.id) ? lockedDimension(dim) : dim));
         // Estimate total work up front (candidates × passes) to drive the progress bar + ETA.
         this._estimatedEvals = this._estimateEvals();
         this._startTime = Date.now();

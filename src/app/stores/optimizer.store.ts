@@ -2,6 +2,14 @@ import { BaseStore } from './_base.store';
 import { OptimizeProgress, OptimizeResult } from 'src/app/optimizer/types';
 import { AttackTypeConstraint } from 'src/app/optimizer/weapon-rules';
 
+/**
+ * Which items the equipment search may draw from:
+ * - `owned` — only gear the character has ever found (the default, smallest pool).
+ * - `craftable` — owned gear PLUS anything the character is a high enough skill level to craft.
+ * - `all` — every equippable item in the game.
+ */
+export type ItemPool = 'owned' | 'craftable' | 'all';
+
 export interface OptimizerState {
     isRunning: boolean;
     /** Trials used per candidate during the search (kept low for speed). */
@@ -36,6 +44,8 @@ export interface OptimizerState {
      * ranged weapon). One of: 'current' | 'any' | 'melee' | 'ranged' | 'magic'.
      */
     attackTypeConstraint: AttackTypeConstraint;
+    /** Which items the equipment search may draw from (owned / owned+craftable / all). */
+    itemPool: ItemPool;
     progress?: OptimizeProgress;
     result?: OptimizeResult;
 }
@@ -49,7 +59,8 @@ export class OptimizerStore extends BaseStore<OptimizerState> {
             fastSearch: true,
             preRankTopK: 0,
             workerCount: 0,
-            attackTypeConstraint: 'current'
+            attackTypeConstraint: 'current',
+            itemPool: 'owned'
         });
     }
 }
