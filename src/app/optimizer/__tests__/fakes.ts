@@ -93,6 +93,10 @@ export class FakeApplier implements LoadoutApplier {
         this.world.current = new Map(loadout);
     }
 
+    public unequip(slotId: string): void {
+        this.world.current.delete(slotId);
+    }
+
     public equip(slotId: string, itemId: string): void {
         const item = this.world.item(itemId);
         // Forward: the new item clears the slots it occupies (e.g. a 2H weapon clears the shield).

@@ -365,6 +365,17 @@ export class GameLoadoutApplier implements LoadoutApplier {
         this.equipInternal(slotId, itemId);
     }
 
+    public unequip(slotId: string): void {
+        const slot = Global.game.equipmentSlots.getObjectByID(slotId);
+        const player = Global.game.combat.player;
+        const current = player.equipment.equippedItems[slotId]?.item;
+        if (!slot || !current || current.id === EMPTY_ITEM) {
+            return; // unknown slot or already empty
+        }
+        // set 0 = the sim player's active equipment set (mirrors the equipItem set arg above).
+        player.unequipItem(0, slot);
+    }
+
     private equipInternal(slotId: string, itemId: string): void {
         const item = Global.game.items.equipment.getObjectByID(itemId);
         const slot = Global.game.equipmentSlots.getObjectByID(slotId);
@@ -565,14 +576,17 @@ export function summonSynergyDimension(applier: GameLoadoutApplier, ownedOnly: b
 export function buildDimensions(
     applier: GameLoadoutApplier,
     candidates: GameCandidateProvider,
-    options: { ownedOnly?: boolean; food?: boolean; summonSynergy?: boolean } = {}
+    options: { ownedOnly?: boolean; food?: boolean; summonSynergy?: boolean; allowEmpty?: boolean } = {}
 ): Dimension[] {
     const summonSynergy = options.summonSynergy ?? false;
+    // allowEmpty (default TRUE for the real game) lets the search leave a slot empty when that beats
+    // every item — the sim decides. Coordinate ascent could otherwise only swap, never unequip.
     const dims = equipmentDimensions(
         applier,
         candidates,
         slotLabel,
-        summonSynergy ? SUMMON_SLOT_IDS : undefined
+        summonSynergy ? SUMMON_SLOT_IDS : undefined,
+        options.allowEmpty ?? true
     );
     if (summonSynergy) {
         dims.push(summonSynergyDimension(applier, options.ownedOnly ?? true));

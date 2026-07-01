@@ -78,6 +78,8 @@ export interface LoadoutApplier extends SetupApplier {
     applyLoadout(loadout: EquipmentLoadout): void;
     /** Equip one item into a slot on top of the current loadout (may resolve conflicts). */
     equip(slotId: string, itemId: string): void;
+    /** Empty a single slot (leave the rest of the loadout untouched). No-op if already empty. */
+    unequip(slotId: string): void;
 }
 
 /** A choice for a dimension — opaque to the optimizer (item id, prayer set, potion, food id…). */

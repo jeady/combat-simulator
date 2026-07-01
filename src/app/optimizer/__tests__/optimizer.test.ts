@@ -17,6 +17,17 @@ function build(world: FakeWorld, scorer = new FakeScorer(world)) {
 /** The fake's snapshot IS the equipment map, so read the best loadout straight off bestSetup. */
 const setup = (result: OptimizeResult) => result.bestSetup as Map<string, string>;
 
+/** Build with the empty/unequip candidate enabled (equipmentDimensions `includeEmpty`). */
+function buildWithEmpty(world: FakeWorld, scorer = new FakeScorer(world)) {
+    const applier = new FakeApplier(world);
+    const optimizer = new CoordinateAscentOptimizer(
+        scorer,
+        equipmentDimensions(applier, new FakeCandidateProvider(world), undefined, undefined, true),
+        applier
+    );
+    return { optimizer, scorer };
+}
+
 describe('CoordinateAscentOptimizer', () => {
     it('reaches the known optimum across multiple slots', async () => {
         const world = new FakeWorld(
@@ -265,6 +276,38 @@ describe('CoordinateAscentOptimizer', () => {
             const search = scorer.deathAbortThresholds.slice(0, -1);
             expect(search.every(t => t === Infinity)).toBe(true);
         });
+    });
+
+    it('empties a slot when unequipping beats every item (includeEmpty)', async () => {
+        // The only item for the slot is a net-negative "cursed" trinket; leaving the slot empty
+        // (metric 0) beats wearing it (metric -50). Without includeEmpty the search could only swap.
+        const world = new FakeWorld(
+            ['trinket'],
+            [{ id: 'cursed', slotId: 'trinket', power: -50 }],
+            { trinket: 'cursed' }
+        );
+        const { optimizer } = buildWithEmpty(world);
+
+        const result = await optimizer.run(TARGET);
+
+        expect(setup(result).has('trinket')).toBe(false); // unequipped
+        expect(result.bestMetric).toBe(0);
+        expect(result.improved).toBe(true);
+    });
+
+    it('does not offer the empty candidate unless includeEmpty is set (regression guard)', async () => {
+        const world = new FakeWorld(
+            ['trinket'],
+            [{ id: 'cursed', slotId: 'trinket', power: -50 }],
+            { trinket: 'cursed' }
+        );
+        const { optimizer } = build(world); // default: no empty candidate
+
+        const result = await optimizer.run(TARGET);
+
+        // Can't unequip, and there's no better item, so it's stuck with the cursed trinket.
+        expect(setup(result).get('trinket')).toBe('cursed');
+        expect(result.bestMetric).toBe(-50);
     });
 
     it('emits progress updates', async () => {

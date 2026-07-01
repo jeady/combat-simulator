@@ -20,7 +20,8 @@ export function equipmentDimensions(
     applier: LoadoutApplier,
     candidates: CandidateProvider,
     label: (slotId: string) => string = slotId => slotId,
-    excludeSlotIds: Set<string> = new Set()
+    excludeSlotIds: Set<string> = new Set(),
+    includeEmpty = false
 ): Dimension[] {
     return applier
         .slots()
@@ -28,11 +29,17 @@ export function equipmentDimensions(
         .map(slot => ({
         id: slot.id,
         label: label(slot.id),
-        getCandidates: () => candidates.getCandidates(slot.id),
+        // With `includeEmpty`, `null` (unequip) is offered as a candidate so the search can leave a
+        // slot empty when that's genuinely better (a cursed/negative item, or freeing a coupled slot).
+        // Coordinate ascent could previously only SWAP, never empty a slot. Opt-in so existing callers
+        // (and their evaluation-count assertions) are unaffected.
+        getCandidates: () => (includeEmpty ? [...candidates.getCandidates(slot.id), null] : candidates.getCandidates(slot.id)),
         getCurrentChoice: () => applier.getCurrentLoadout().get(slot.id) ?? null,
         applyChoice: (choice: unknown) => {
             if (choice != null) {
                 applier.equip(slot.id, choice as string);
+            } else {
+                applier.unequip(slot.id);
             }
         },
         equals: (a: unknown, b: unknown) => a === b,

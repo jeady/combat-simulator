@@ -86,6 +86,12 @@ class HarnessApplier implements LoadoutApplier {
         }
         g().combat.player.equipItem(item, 0, slot, 1, true);
     }
+    public unequip(slotId: string): void {
+        const slot = g().equipmentSlots.getObjectByID(slotId);
+        if (slot) {
+            g().combat.player.unequipItem(0, slot);
+        }
+    }
 }
 
 /** Per-slot candidate item ids, supplied by the harness test. */
