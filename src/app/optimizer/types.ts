@@ -28,6 +28,14 @@ export interface Evaluation {
     deathRate: number;
     /** False if the simulation did not produce a usable result. */
     success: boolean;
+    /**
+     * Standard error of {@link metric} — the Monte-Carlo sampling uncertainty of this estimate (from
+     * batch means over the trials). Lets the optimizer accept a swap only when the improvement is
+     * statistically significant, not noise. Undefined when the scorer can't estimate it (e.g. the
+     * analytic surrogate, or a run with too few trials to batch); the search then falls back to the
+     * fixed `minImprovement` margin.
+     */
+    stdError?: number;
 }
 
 /**
@@ -122,8 +130,16 @@ export interface OptimizeOptions {
     maxPasses: number;
     /** A loadout is feasible only if deathRate <= this. Default 0. */
     deathRateThreshold: number;
-    /** Require this much directed-metric gain to accept a swap (noise guard). Default 0. */
+    /** Require this much directed-metric gain to accept a swap (absolute noise guard). Default 0. */
     minImprovement: number;
+    /**
+     * Statistical-significance guard (§ significance). A swap is accepted only if the metric improves
+     * by more than `significanceZ × combinedStandardError` (as well as `minImprovement`), so a change
+     * that's within Monte-Carlo noise is never recommended — a status-quo bias toward the incumbent.
+     * `z` is a normal quantile: 1.645 ≈ 95% one-sided (default), 1.0 ≈ 84%, 0 disables the guard.
+     * Only bites when the scorer supplies `Evaluation.stdError`; otherwise it's a no-op.
+     */
+    significanceZ: number;
     /**
      * Abort a search simulation as soon as it has accrued enough deaths to be *certainly* infeasible
      * (more than `deathRateThreshold` allows), instead of running every trial. Pure speed-up: the
@@ -153,6 +169,7 @@ export const DEFAULT_OPTIONS: OptimizeOptions = {
     maxPasses: 3,
     deathRateThreshold: 0,
     minImprovement: 0,
+    significanceZ: 1.645,
     earlyStopOnDeath: true,
     screenTrials: 0,
     screenKeep: 3

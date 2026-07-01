@@ -27,6 +27,8 @@ interface Score {
     /** Directed metric (sign-flipped for minimize objectives); -Infinity if the sim failed. */
     value: number;
     deathRate: number;
+    /** Standard error of the metric (Monte-Carlo noise), or 0 if the scorer didn't estimate it. */
+    stdError: number;
 }
 
 export class CoordinateAscentOptimizer {
@@ -151,7 +153,7 @@ export class CoordinateAscentOptimizer {
                             break;
                         }
                         const score = await evalChoice(choice, opts.searchTrials, searchAbortThreshold);
-                        if (this.better(score, bestDimScore, opts.minImprovement)) {
+                        if (this.better(score, bestDimScore, opts.minImprovement, opts.significanceZ)) {
                             bestDimScore = score;
                             bestChoice = choice;
                         }
@@ -221,20 +223,28 @@ export class CoordinateAscentOptimizer {
         const usable = evaluation.success && !Number.isNaN(evaluation.metric);
         const value = !usable ? -Infinity : this.scorer.isMaximize() ? evaluation.metric : -evaluation.metric;
         const feasible = usable && evaluation.deathRate <= deathRateThreshold;
-        return { feasible, value, deathRate: usable ? evaluation.deathRate : Infinity };
+        return {
+            feasible,
+            value,
+            deathRate: usable ? evaluation.deathRate : Infinity,
+            // stdError is symmetric under the minimize sign-flip, so the raw value carries over.
+            stdError: usable && Number.isFinite(evaluation.stdError) ? (evaluation.stdError as number) : 0
+        };
     }
 
     /**
      * Is `a` strictly better than `b`? Feasibility dominates; among feasible setups the directed
-     * metric decides (with a noise-guard margin); among infeasible ones, prefer the one closer to
-     * surviving (lower death rate).
+     * metric must clear a noise margin — the larger of the fixed `minImprovement` and a statistical
+     * `z × combinedStandardError` band, so a swap that's within Monte-Carlo noise is NOT accepted
+     * (status-quo bias). Among infeasible setups, prefer the one closer to surviving (lower death rate).
      */
-    private better(a: Score, b: Score, minImprovement: number): boolean {
+    private better(a: Score, b: Score, minImprovement: number, significanceZ = 0): boolean {
         if (a.feasible !== b.feasible) {
             return a.feasible;
         }
         if (a.feasible) {
-            return a.value > b.value + minImprovement;
+            const significanceMargin = significanceZ * Math.hypot(a.stdError, b.stdError);
+            return a.value > b.value + Math.max(minImprovement, significanceMargin);
         }
         return a.deathRate < b.deathRate;
     }

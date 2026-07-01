@@ -360,6 +360,76 @@ describe('CoordinateAscentOptimizer', () => {
         });
     });
 
+    describe('statistical significance gating', () => {
+        /** A scorer that reports a fixed metric AND a fixed stdError for whatever is equipped. */
+        class NoisyScorer extends FakeScorer {
+            constructor(w: FakeWorld, private readonly stdError: number) {
+                super(w);
+            }
+            public async evaluate(t: OptimizeTarget, trials: number, ticks: number, abort?: number) {
+                const base = await super.evaluate(t, trials, ticks, abort);
+                return { ...base, stdError: this.stdError };
+            }
+        }
+
+        it('does NOT swap when the improvement is within noise (z·SE)', async () => {
+            // Candidate is nominally better (11 vs 10) but SE=5 makes the gap statistically insignificant.
+            const world = new FakeWorld(
+                ['weapon'],
+                [{ id: 'cur', slotId: 'weapon', power: 10 }, { id: 'noise', slotId: 'weapon', power: 11 }],
+                { weapon: 'cur' }
+            );
+            const applier = new FakeApplier(world);
+            const optimizer = new CoordinateAscentOptimizer(
+                new NoisyScorer(world, 5),
+                equipmentDimensions(applier, new FakeCandidateProvider(world)),
+                applier
+            );
+
+            const result = await optimizer.run(TARGET, { significanceZ: 1.645 });
+
+            expect(setup(result).get('weapon')).toBe('cur'); // stayed put — the gain was noise
+            expect(result.improved).toBe(false);
+        });
+
+        it('DOES swap when the improvement clears the significance band', async () => {
+            // Same SE=5, but now a decisively better candidate (100 vs 10): 90 >> 1.645·√(25+25).
+            const world = new FakeWorld(
+                ['weapon'],
+                [{ id: 'cur', slotId: 'weapon', power: 10 }, { id: 'real', slotId: 'weapon', power: 100 }],
+                { weapon: 'cur' }
+            );
+            const applier = new FakeApplier(world);
+            const optimizer = new CoordinateAscentOptimizer(
+                new NoisyScorer(world, 5),
+                equipmentDimensions(applier, new FakeCandidateProvider(world)),
+                applier
+            );
+
+            const result = await optimizer.run(TARGET, { significanceZ: 1.645 });
+
+            expect(setup(result).get('weapon')).toBe('real');
+        });
+
+        it('with significanceZ 0, the tiny gain IS taken (guard disabled)', async () => {
+            const world = new FakeWorld(
+                ['weapon'],
+                [{ id: 'cur', slotId: 'weapon', power: 10 }, { id: 'noise', slotId: 'weapon', power: 11 }],
+                { weapon: 'cur' }
+            );
+            const applier = new FakeApplier(world);
+            const optimizer = new CoordinateAscentOptimizer(
+                new NoisyScorer(world, 5),
+                equipmentDimensions(applier, new FakeCandidateProvider(world)),
+                applier
+            );
+
+            const result = await optimizer.run(TARGET, { significanceZ: 0 });
+
+            expect(setup(result).get('weapon')).toBe('noise');
+        });
+    });
+
     it('emits progress updates', async () => {
         const world = new FakeWorld(
             ['weapon'],
