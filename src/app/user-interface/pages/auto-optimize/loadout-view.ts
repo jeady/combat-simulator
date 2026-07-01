@@ -16,8 +16,11 @@ import { Dimension, DimensionChoice } from 'src/app/optimizer/types';
 export interface RenderedLoadout {
     /** slotId -> itemId, non-empty slots only. */
     equipment: Map<string, string>;
-    /** One entry per non-equipment dimension (food, potion, …), in dimension order. */
-    consumables: { id: string; label: string; itemId: string | null }[];
+    /**
+     * One entry per non-equipment dimension (food, potion, prayers, …), in dimension order.
+     * `itemIds` are the icons to render — 0 for none, 1 for food/potion, up to 2 for a prayer set.
+     */
+    consumables: { id: string; label: string; itemIds: string[] }[];
 }
 
 /**
@@ -36,7 +39,14 @@ export function choicesToLoadout(dims: Dimension[], choices: DimensionChoice[]):
                 equipment.set(dim.id, choice as string);
             }
         } else {
-            consumables.push({ id: dim.id, label: dim.label, itemId: (choice as string) ?? null });
+            // Consumable choices are usually a single id (food/potion), but the prayers dimension's
+            // choice is a set of prayer ids — normalise both to a flat id list for rendering.
+            const itemIds = Array.isArray(choice)
+                ? (choice as string[]).filter(Boolean)
+                : choice
+                ? [choice as string]
+                : [];
+            consumables.push({ id: dim.id, label: dim.label, itemIds });
         }
     });
 
@@ -74,15 +84,36 @@ function equipmentIcon(slotId: string, itemId: string | undefined, classes: stri
     return iconCell(slot?.emptyMedia ?? '', slot?.localID, ['mcs-ao-icon-empty', ...classes]);
 }
 
-/** Tooltip + media for a consumable choice (food/potion item id), or a "none" placeholder. */
-function consumableIcon(consumable: RenderedLoadout['consumables'][number], classes: string[]): HTMLDivElement {
-    const item = consumable.itemId ? Global.game.items.getObjectByID(consumable.itemId) : undefined;
+/** Resolve an id to its media + display name, trying the item registry then the prayer registry. */
+function resolveEntity(id: string): { media: string; name: string } | undefined {
+    const item = Global.game.items.getObjectByID(id);
     if (item) {
-        const tooltip = `<div class="text-warning">${consumable.label}</div><div>${item.name}</div>`;
-        return iconCell(item.media, tooltip, classes);
+        return { media: item.media, name: item.name };
     }
-    const tooltip = `<div class="text-warning">${consumable.label}</div><div>None</div>`;
-    return iconCell(Global.game.emptyFoodItem?.media ?? '', tooltip, ['mcs-ao-icon-empty', ...classes]);
+    const prayer = Global.game.prayers.getObjectByID(id);
+    if (prayer) {
+        return { media: prayer.media, name: prayer.name };
+    }
+    return undefined;
+}
+
+/** A consumable dimension as its 1+ icons (food/potion = 1, a prayer set = up to 2), or a "none" cell. */
+function consumableGroup(consumable: RenderedLoadout['consumables'][number], classes: string[]): HTMLElement {
+    const group = createElement('div', { classList: ['mcs-ao-consumable-group', ...classes] });
+
+    const resolved = consumable.itemIds.map(resolveEntity).filter((entity): entity is { media: string; name: string } => !!entity);
+
+    if (resolved.length === 0) {
+        const tooltip = `<div class="text-warning">${consumable.label}</div><div>None</div>`;
+        group.appendChild(iconCell(Global.game.emptyFoodItem?.media ?? '', tooltip, ['mcs-ao-icon-empty']));
+        return group;
+    }
+
+    for (const entity of resolved) {
+        const tooltip = `<div class="text-warning">${consumable.label}</div><div>${entity.name}</div>`;
+        group.appendChild(iconCell(entity.media, tooltip, []));
+    }
+    return group;
 }
 
 /**
@@ -152,17 +183,33 @@ export class LiveLoadoutGrid {
         this.consumablesRow.innerHTML = '';
         for (const consumable of loadout.consumables) {
             const classes = consumable.id === highlightSlotId ? ['mcs-ao-changed'] : [];
-            this.consumablesRow.appendChild(consumableIcon(consumable, classes));
+            this.consumablesRow.appendChild(consumableGroup(consumable, classes));
         }
     }
+}
+
+export interface LoadoutRowOptions {
+    /** Emphasise a single dimension — the slot/consumable being tested this evaluation. */
+    highlightDimId?: string;
+    /**
+     * Emphasise every slot/consumable whose choice differs from this reference loadout (e.g. the
+     * user's currently-equipped setup). Takes precedence over {@link highlightDimId} when set.
+     */
+    diffFrom?: RenderedLoadout;
+}
+
+/** Sorted, comma-joined key for a consumable's id list, for value-comparison against a baseline. */
+function consumableKey(itemIds: string[]): string {
+    return [...itemIds].sort().join(',');
 }
 
 /**
  * A compact one-line strip of the equipped gear (in slot order) followed by consumables — for the
  * new-best feed and the leaderboard, where many setups stack vertically and a full grid is too big.
- * `highlightDimId` emphasises the slot/consumable that changed.
+ * With {@link LoadoutRowOptions.diffFrom} every item differing from that baseline is highlighted;
+ * otherwise {@link LoadoutRowOptions.highlightDimId} emphasises the single slot/consumable that changed.
  */
-export function loadoutRow(loadout: RenderedLoadout, highlightDimId?: string): HTMLElement {
+export function loadoutRow(loadout: RenderedLoadout, opts: LoadoutRowOptions = {}): HTMLElement {
     const row = createElement('div', { classList: ['mcs-ao-row'] });
 
     Global.game.equipmentSlots.forEach(slot => {
@@ -170,16 +217,21 @@ export function loadoutRow(loadout: RenderedLoadout, highlightDimId?: string): H
         if (!itemId) {
             return; // compact: skip empty slots entirely
         }
-        const classes = slot.id === highlightDimId ? ['mcs-ao-changed'] : [];
-        row.appendChild(equipmentIcon(slot.id, itemId, classes));
+        const highlight = opts.diffFrom
+            ? opts.diffFrom.equipment.get(slot.id) !== itemId
+            : opts.highlightDimId === slot.id;
+        row.appendChild(equipmentIcon(slot.id, itemId, highlight ? ['mcs-ao-changed'] : []));
     });
 
     for (const consumable of loadout.consumables) {
-        if (!consumable.itemId) {
-            continue;
+        if (consumable.itemIds.length === 0) {
+            continue; // compact: skip empty consumable dimensions
         }
-        const classes = consumable.id === highlightDimId ? ['mcs-ao-changed'] : [];
-        row.appendChild(consumableIcon(consumable, classes));
+        const baseline = opts.diffFrom?.consumables.find(entry => entry.id === consumable.id);
+        const highlight = opts.diffFrom
+            ? consumableKey(baseline?.itemIds ?? []) !== consumableKey(consumable.itemIds)
+            : opts.highlightDimId === consumable.id;
+        row.appendChild(consumableGroup(consumable, highlight ? ['mcs-ao-changed'] : []));
     }
 
     return row;

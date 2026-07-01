@@ -30,6 +30,12 @@
     width: 6rem;
 }
 
+.mcs-auto-optimize-hint {
+    font-size: 0.85rem;
+    line-height: 1.35;
+    max-width: 48rem;
+}
+
 .mcs-auto-optimize-status {
     font-weight: 600;
 }
@@ -115,6 +121,19 @@
     height: 1.5rem;
 }
 
+/* A consumable dimension (food/potion = 1 icon, a prayer set = up to 2) rendered as a group. */
+.mcs-ao-consumable-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 1px;
+    border-radius: 4px;
+
+    &.mcs-ao-changed {
+        outline: 2px solid #4f9dff;
+        background: rgba(79, 157, 255, 0.15);
+    }
+}
+
 /* --- Live "currently evaluating" grid --- */
 .mcs-auto-optimize-section-title {
     font-weight: 600;
@@ -126,6 +145,49 @@
     opacity: 0.85;
     margin-bottom: 0.4rem;
     min-height: 1.1em;
+}
+
+/* --- Progress bar + ETA --- */
+.mcs-auto-optimize-progressbar {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.mcs-auto-optimize-progressbar-track {
+    flex: 1;
+    height: 0.6rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.1);
+    overflow: hidden;
+}
+
+.mcs-auto-optimize-progressbar-fill {
+    height: 100%;
+    width: 0;
+    border-radius: 999px;
+    background: #4f9dff;
+    transition: width 0.2s ease;
+}
+
+.mcs-auto-optimize-eta {
+    font-family: monospace;
+    opacity: 0.85;
+    white-space: nowrap;
+    min-width: 6rem;
+    text-align: right;
+}
+
+/* --- Current setup / Currently evaluating columns --- */
+.mcs-auto-optimize-live-columns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.5rem;
+}
+
+.mcs-auto-optimize-live-col {
+    flex: 1 1 16rem;
+    min-width: 0;
 }
 
 .mcs-ao-live {

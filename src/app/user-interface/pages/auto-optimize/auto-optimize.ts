@@ -16,6 +16,7 @@ import {
 } from 'src/app/optimizer/adapters';
 import {
     CancelToken,
+    DEFAULT_OPTIONS,
     Dimension,
     DimensionChoice,
     OptimizeEvent,
@@ -24,7 +25,7 @@ import {
     OptimizeResult,
     OptimizeTarget
 } from 'src/app/optimizer/types';
-import { choicesToLoadout, LiveLoadoutGrid, loadoutRow } from './loadout-view';
+import { choicesToLoadout, LiveLoadoutGrid, loadoutRow, RenderedLoadout } from './loadout-view';
 import { Lookup } from 'src/shared/utils/lookup';
 
 // Injected at build time by webpack DefinePlugin (see webpack.config.ts) so the page can show which
@@ -80,6 +81,12 @@ export class AutoOptimizePage extends HTMLElement {
     private readonly _leaderboardPanel: HTMLDivElement;
     private readonly _leaderboard: HTMLDivElement;
 
+    private readonly _progressBar: HTMLDivElement;
+    private readonly _progressBarFill: HTMLDivElement;
+    private readonly _progressEta: HTMLDivElement;
+    private readonly _baseCaption: HTMLDivElement;
+    private readonly _baseGridHost: HTMLDivElement;
+
     private readonly _scorer = new GameScorer();
     private _cancel?: CancelToken;
     private _result?: OptimizeResult;
@@ -90,10 +97,17 @@ export class AutoOptimizePage extends HTMLElement {
     private _runDims: Dimension[] = [];
 
     private _liveGrid?: LiveLoadoutGrid;
+    /** The "Current setup" grid (the user's equipped gear at the start of the run). */
+    private _baseGrid?: LiveLoadoutGrid;
+    /** Baseline loadout, for the "Current setup" panel and diff-highlighting in the feed/leaderboard. */
+    private _baselineLoadout?: RenderedLoadout;
     private readonly _leaderboardMap = new Map<string, LeaderEntry>();
     private _latest?: OptimizeEvent;
     private _renderScheduled = false;
     private _leaderboardSig = '';
+    /** Progress-bar/ETA bookkeeping: rough total-evaluation estimate + run start time. */
+    private _estimatedEvals = 1;
+    private _startTime = 0;
 
     constructor() {
         super();
@@ -120,6 +134,12 @@ export class AutoOptimizePage extends HTMLElement {
         this._feed = getElementFromFragment(this._content, 'mcs-auto-optimize-feed', 'div');
         this._leaderboardPanel = getElementFromFragment(this._content, 'mcs-auto-optimize-leaderboard-panel', 'div');
         this._leaderboard = getElementFromFragment(this._content, 'mcs-auto-optimize-leaderboard', 'div');
+
+        this._progressBar = getElementFromFragment(this._content, 'mcs-auto-optimize-progressbar', 'div');
+        this._progressBarFill = getElementFromFragment(this._content, 'mcs-auto-optimize-progressbar-fill', 'div');
+        this._progressEta = getElementFromFragment(this._content, 'mcs-auto-optimize-eta', 'div');
+        this._baseCaption = getElementFromFragment(this._content, 'mcs-auto-optimize-base-caption', 'div');
+        this._baseGridHost = getElementFromFragment(this._content, 'mcs-auto-optimize-base-grid', 'div');
     }
 
     public connectedCallback() {
@@ -285,6 +305,9 @@ export class AutoOptimizePage extends HTMLElement {
         this._runDims = buildDimensions(applier, new GameCandidateProvider(true)).map(dim =>
             this._lockedDims.has(dim.id) ? lockedDimension(dim) : dim
         );
+        // Estimate total work up front (candidates × passes) to drive the progress bar + ETA.
+        this._estimatedEvals = this._estimateEvals();
+        this._startTime = Date.now();
         const optimizer = new CoordinateAscentOptimizer(this._scorer, this._runDims, applier);
         const sim = Global.stores.simulator.state;
 
@@ -337,12 +360,23 @@ export class AutoOptimizePage extends HTMLElement {
         this._leaderboardMap.clear();
         this._leaderboardSig = '';
         this._latest = undefined;
+        this._baselineLoadout = undefined;
         this._feed.innerHTML = '';
         this._leaderboard.innerHTML = '';
         this._liveCaption.textContent = '';
         this._liveGridHost.innerHTML = '';
         this._liveGrid = new LiveLoadoutGrid();
         this._liveGridHost.appendChild(this._liveGrid.element);
+
+        this._baseCaption.textContent = '';
+        this._baseGridHost.innerHTML = '';
+        this._baseGrid = new LiveLoadoutGrid();
+        this._baseGridHost.appendChild(this._baseGrid.element);
+
+        this._progressBar.style.display = '';
+        this._progressBarFill.style.width = '0%';
+        this._progressEta.textContent = '';
+
         this._livePanel.style.display = '';
         this._feedPanel.style.display = '';
         this._leaderboardPanel.style.display = '';
@@ -350,6 +384,13 @@ export class AutoOptimizePage extends HTMLElement {
 
     /** Fold one optimizer event into the leaderboard + live state, scheduling a coalesced repaint. */
     private _onEvent(event: OptimizeEvent) {
+        // The first event (changedIndex -1) is the baseline: the user's current setup + its score.
+        if (event.changedIndex === -1 && !this._baselineLoadout) {
+            this._baselineLoadout = choicesToLoadout(this._runDims, event.choices);
+            this._baseGrid?.update(this._baselineLoadout);
+            this._baseCaption.textContent = this._scoreCaption('Current', event);
+        }
+
         const key = JSON.stringify(event.choices);
         const existing = this._leaderboardMap.get(key);
         if (!existing || this._directed(event.metric) > this._directed(existing.metric)) {
@@ -388,6 +429,7 @@ export class AutoOptimizePage extends HTMLElement {
                 this._latest.changedIndex >= 0 ? this._runDims[this._latest.changedIndex]?.id : undefined;
             this._liveGrid.update(loadout, changedId);
             this._liveCaption.textContent = this._candidateCaption(this._latest);
+            this._updateProgressBar(this._latest.evaluations, false);
         }
         this._renderLeaderboard();
     }
@@ -399,13 +441,21 @@ export class AutoOptimizePage extends HTMLElement {
         return `trying ${metric} · ${death}${flag}`;
     }
 
+    /** "Current: 1,234 /h · 0.0% death" (or "… · infeasible") for the baseline / current-setup panel. */
+    private _scoreCaption(label: string, event: OptimizeEvent): string {
+        const metric = Number.isFinite(event.metric) ? `${this._format(event.metric)}${this._metricUnit()}` : 'failed';
+        const death = `${(event.deathRate * 100).toFixed(1)}% death`;
+        const flag = event.feasible ? '' : ' · infeasible';
+        return `${label}: ${metric} · ${death}${flag}`;
+    }
+
     /** Append one "new best" row (compact icon strip + metric) to the feed. */
     private _appendFeed(event: OptimizeEvent) {
         const loadout = choicesToLoadout(this._runDims, event.choices);
-        const changedId = event.changedIndex >= 0 ? this._runDims[event.changedIndex]?.id : undefined;
 
         const entry = createElement('div', { classList: ['mcs-ao-entry'] });
-        const row = loadoutRow(loadout, changedId);
+        // Highlight every item that differs from the user's currently-equipped setup.
+        const row = loadoutRow(loadout, { diffFrom: this._baselineLoadout });
         const metric = createElement('div', {
             classList: ['mcs-ao-entry-metric'],
             text: `${this._format(event.metric)}${this._metricUnit()}`
@@ -438,7 +488,7 @@ export class AutoOptimizePage extends HTMLElement {
             const row = createElement('div', { classList: ['mcs-ao-entry'] });
 
             const rank = createElement('div', { classList: ['mcs-ao-entry-rank'], text: `#${index + 1}` });
-            const icons = loadoutRow(loadout);
+            const icons = loadoutRow(loadout, { diffFrom: this._baselineLoadout });
 
             const metricText = Number.isFinite(entry.metric) ? `${this._format(entry.metric)}${this._metricUnit()}` : '—';
             const death = entry.feasible ? '' : ` ☠${(entry.deathRate * 100).toFixed(0)}%`;
@@ -478,9 +528,52 @@ export class AutoOptimizePage extends HTMLElement {
             `${this._phaseLabel(progress.phase)} · pass ${progress.pass} · ` +
             slotPart +
             `evals ${progress.evaluations} · best ${best}`;
+
+        const done = progress.phase === 'done' || progress.phase === 'cancelled' || progress.phase === 'aborted';
+        this._updateProgressBar(progress.evaluations, done);
+    }
+
+    /**
+     * Rough upfront estimate of total evaluations: candidates per (searchable) dimension × max passes,
+     * plus the baseline + final re-score. An over-estimate (searches usually converge before maxPasses),
+     * so the ETA errs long and the bar jumps to 100% on completion rather than stalling past it.
+     */
+    private _estimateEvals(): number {
+        const perPass = this._runDims.reduce((sum, dim) => sum + Math.max(0, dim.getCandidates().length - 1), 0);
+        return Math.max(1, perPass * DEFAULT_OPTIONS.maxPasses + 2);
+    }
+
+    private _updateProgressBar(evaluations: number, done: boolean) {
+        const fraction = done ? 1 : Math.min(0.99, evaluations / this._estimatedEvals);
+        this._progressBarFill.style.width = `${(fraction * 100).toFixed(1)}%`;
+
+        if (done) {
+            this._progressEta.textContent = 'done';
+            return;
+        }
+
+        const elapsed = Date.now() - this._startTime;
+        if (evaluations > 0 && elapsed > 0) {
+            const perEval = elapsed / evaluations;
+            const remaining = Math.max(0, this._estimatedEvals - evaluations) * perEval;
+            this._progressEta.textContent = `ETA ${this._formatEta(remaining)}`;
+        } else {
+            this._progressEta.textContent = '';
+        }
+    }
+
+    private _formatEta(ms: number): string {
+        const seconds = Math.max(0, Math.ceil(ms / 1000));
+        if (seconds < 60) {
+            return `~${seconds}s`;
+        }
+        return `~${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
     }
 
     private _renderResult(result: OptimizeResult) {
+        // The run is over regardless of outcome — settle the progress bar at 100%.
+        this._updateProgressBar(result.evaluations, true);
+
         // If even the baseline couldn't be scored, every simulation failed — e.g. the character
         // can't defeat the target (a realm/setup mismatch), or the metric is unavailable for it.
         if (!Number.isFinite(result.baselineMetric)) {

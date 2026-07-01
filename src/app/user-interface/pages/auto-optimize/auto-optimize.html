@@ -23,6 +23,12 @@
             </button>
         </div>
 
+        <div class="text-muted mcs-auto-optimize-hint">
+            <strong>Search trials</strong> is how many simulated fights each candidate loadout is judged on while
+            searching — fewer is faster but noisier. The single best setup found is then re-tested at your Simulate
+            page's full trial count before the result is shown.
+        </div>
+
         <details id="mcs-auto-optimize-scope" class="mcs-auto-optimize-scope">
             <summary>Search scope — lock slots to keep them fixed</summary>
             <div class="mcs-auto-optimize-scope-actions">
@@ -35,10 +41,26 @@
         <div id="mcs-auto-optimize-status" class="mcs-auto-optimize-status"></div>
         <div id="mcs-auto-optimize-progress" class="mcs-auto-optimize-progress"></div>
 
+        <div id="mcs-auto-optimize-progressbar" class="mcs-auto-optimize-progressbar" style="display: none">
+            <div class="mcs-auto-optimize-progressbar-track">
+                <div id="mcs-auto-optimize-progressbar-fill" class="mcs-auto-optimize-progressbar-fill"></div>
+            </div>
+            <div id="mcs-auto-optimize-eta" class="mcs-auto-optimize-eta"></div>
+        </div>
+
         <div id="mcs-auto-optimize-live" class="mcs-auto-optimize-live-panel" style="display: none">
-            <div class="mcs-auto-optimize-section-title">Currently evaluating</div>
-            <div id="mcs-auto-optimize-live-caption" class="mcs-auto-optimize-live-caption"></div>
-            <div id="mcs-auto-optimize-live-grid"></div>
+            <div class="mcs-auto-optimize-live-columns">
+                <div class="mcs-auto-optimize-live-col">
+                    <div class="mcs-auto-optimize-section-title">Current setup</div>
+                    <div id="mcs-auto-optimize-base-caption" class="mcs-auto-optimize-live-caption"></div>
+                    <div id="mcs-auto-optimize-base-grid"></div>
+                </div>
+                <div class="mcs-auto-optimize-live-col">
+                    <div class="mcs-auto-optimize-section-title">Currently evaluating</div>
+                    <div id="mcs-auto-optimize-live-caption" class="mcs-auto-optimize-live-caption"></div>
+                    <div id="mcs-auto-optimize-live-grid"></div>
+                </div>
+            </div>
         </div>
 
         <div class="mcs-auto-optimize-columns">
