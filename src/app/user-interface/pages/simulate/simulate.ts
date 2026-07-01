@@ -199,6 +199,8 @@ export class SimulatePage extends HTMLElement {
             this._time._select(Global.context.accountStorage.getItem(StorageKey.PlotTime));
         }
 
+        this._updateSkillVisibility();
+
         this._slayer._toggle(Global.game.combat.player.isSlayerTask);
         this._slayer._on(isChecked => {
             Global.game.combat.player.isSlayerTask = isChecked;
@@ -257,6 +259,15 @@ export class SimulatePage extends HTMLElement {
         this._toggleSlayer._toggle(this._plotter.slayerToggled);
     }
 
+    /**
+     * The Skill dropdown only chooses which skill's pet/mark odds to plot, so it's meaningless for
+     * every other metric — show it only for the Pet% and Mark% plot types.
+     */
+    private _updateSkillVisibility() {
+        const key = Global.stores.plotter.plotType.key;
+        this._skill.style.display = key === PlotKey.Pet || key === PlotKey.Mark ? '' : 'none';
+    }
+
     private _onQueue(current: number, total: number) {
         for (const simulate of Array.from(Global.userInterface.main.querySelectorAll('mcs-simulate-buttons'))) {
             simulate._simulateAll.textContent = `Cancel (${current + 1}/${total})`;
@@ -292,6 +303,8 @@ export class SimulatePage extends HTMLElement {
         } else {
             this._time.style.display = 'none';
         }
+
+        this._updateSkillVisibility();
 
         if (this._skill._selected) {
             this._information._setPetType(this._skill._selected.text);
