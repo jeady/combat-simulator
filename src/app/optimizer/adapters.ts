@@ -11,6 +11,8 @@ import { SimulateResponse } from 'src/shared/transport/type/simulate';
 import { pruneDominated, StatVector } from 'src/app/optimizer/prune';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
 import { enumerateSummonChoices, normalizeSummonChoice, SummonChoice, summonChoicesEqual } from 'src/app/optimizer/synergy';
+import { PreRankingCandidateProvider } from 'src/app/optimizer/prerank';
+import { AnalyticMetric, CombatStats, estimateMetric, TargetStats } from 'src/app/optimizer/analytic-scorer';
 import { Lookup } from 'src/shared/utils/lookup';
 import {
     CandidateProvider,
@@ -326,6 +328,61 @@ export class GameCandidateProvider implements CandidateProvider {
     }
 }
 
+/**
+ * A nominal target for the analytic PRE-RANK (§2b). Pre-ranking only ranks a slot's candidates
+ * against each other, and every candidate faces the SAME real target — so the target's exact
+ * hitpoints/evasion are a common factor that never changes the ORDER. We therefore score against a
+ * fixed high-evasion nominal target, which reduces the surrogate to a clean, monotonic
+ * `accuracy × avgDamage ÷ interval` gear-quality proxy (high evasion => hitChance ≈ 0.5·acc/eva, i.e.
+ * proportional to accuracy). This deliberately sidesteps deriving real per-attack-type enemy evasion:
+ * the pre-rank is only a cheap FILTER — the full simulator still scores the surviving top-K and has
+ * the final say, and K provides the safety margin if the proxy misranks (e.g. a cross-damage-type
+ * weapon swap). See `prerank.ts` / `analytic-scorer.ts`.
+ */
+const PRERANK_TARGET: TargetStats = { hitpoints: 1, evasion: 1e9 };
+
+/**
+ * Read the sim player's freshly-computed offensive stats into the surrogate's {@link CombatStats}.
+ * The caller MUST have run `combat.computeAllStats()` after the last equip — the app's equip path
+ * uses `isImporting=true`, which SKIPS the stat recompute (see GameLoadoutApplier.equipInternal), so
+ * the stats would otherwise be stale.
+ */
+export function deriveCombatStats(player: { stats: any }): CombatStats {
+    const s = player.stats;
+    return {
+        maxHit: s.maxHit,
+        minHit: s.minHit,
+        accuracy: s.accuracy,
+        attackInterval: s.attackInterval
+    };
+}
+
+/**
+ * A `scoreItem(slotId, itemId)` for {@link PreRankingCandidateProvider}: equip the candidate on the
+ * current background, recompute stats, read the surrogate metric, then restore. Cheap relative to a
+ * worker sim (no IPC, no Monte-Carlo), so pre-ranking to a top-K is a net win. Returns NaN if the
+ * candidate can't be scored (sorted to the bottom by the pre-ranker).
+ */
+export function makeGameScoreItem(
+    applier: GameLoadoutApplier,
+    metric: AnalyticMetric = 'kills'
+): (slotId: string, itemId: string) => number {
+    return (slotId, itemId) => {
+        const snapshot = applier.snapshot();
+        try {
+            applier.equip(slotId, itemId);
+            Global.game.combat.computeAllStats();
+            const value = estimateMetric(deriveCombatStats(Global.game.combat.player), PRERANK_TARGET, metric);
+            return Number.isFinite(value) ? value : NaN;
+        } catch (error) {
+            Global.logger.warn('Optimizer pre-rank scoreItem failed', { slotId, itemId, error });
+            return NaN;
+        } finally {
+            applier.restore(snapshot);
+        }
+    };
+}
+
 /** Mutates / snapshots the sim player's equipment via the existing game + Settings APIs. */
 export class GameLoadoutApplier implements LoadoutApplier {
     /** Full, restorable snapshot of the user's configuration. */
@@ -576,14 +633,34 @@ export function summonSynergyDimension(applier: GameLoadoutApplier, ownedOnly: b
 export function buildDimensions(
     applier: GameLoadoutApplier,
     candidates: GameCandidateProvider,
-    options: { ownedOnly?: boolean; food?: boolean; summonSynergy?: boolean; allowEmpty?: boolean } = {}
+    options: {
+        ownedOnly?: boolean;
+        food?: boolean;
+        summonSynergy?: boolean;
+        allowEmpty?: boolean;
+        /** Analytic two-tier pre-rank: keep only the top-K candidates per slot by surrogate (§2b). 0/undefined = off. */
+        preRankTopK?: number;
+    } = {}
 ): Dimension[] {
     const summonSynergy = options.summonSynergy ?? false;
+    // Two-tier pre-rank: wrap the candidate provider so each slot only surfaces its top-K candidates
+    // by the cheap analytic surrogate, and the expensive sim is spent on the finalists. A HEURISTIC
+    // filter (unlike the sound dominance prune inside GameCandidateProvider), so it's off unless a K
+    // is given; the equipped item is retained so "leave as-is" stays reachable.
+    const provider: GameCandidateProvider | PreRankingCandidateProvider =
+        options.preRankTopK && options.preRankTopK > 0
+            ? new PreRankingCandidateProvider(
+                  candidates,
+                  makeGameScoreItem(applier),
+                  options.preRankTopK,
+                  slotId => applier.getCurrentLoadout().get(slotId)
+              )
+            : candidates;
     // allowEmpty (default TRUE for the real game) lets the search leave a slot empty when that beats
     // every item — the sim decides. Coordinate ascent could otherwise only swap, never unequip.
     const dims = equipmentDimensions(
         applier,
-        candidates,
+        provider,
         slotLabel,
         summonSynergy ? SUMMON_SLOT_IDS : undefined,
         options.allowEmpty ?? true

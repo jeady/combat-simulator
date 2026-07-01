@@ -11,6 +11,8 @@ import { Environment } from 'src/worker/context/environment';
 import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
 import { MemoizingScorer } from 'src/app/optimizer/cache';
+import { PreRankingCandidateProvider } from 'src/app/optimizer/prerank';
+import { estimateMetric } from 'src/app/optimizer/analytic-scorer';
 import {
     CandidateProvider,
     EquipmentLoadout,
@@ -128,6 +130,37 @@ class HarnessCandidateProvider implements CandidateProvider {
             maxTicks,
             deathAbortThreshold
         );
+    },
+    /**
+     * §2b verification: analytic pre-rank of a slot's candidates against the REAL engine. Equips each
+     * candidate, recomputes stats, reads the surrogate (accuracy×damage÷interval vs a nominal target),
+     * and returns the top-K plus every score — so we can confirm the top-K contains the sim winner.
+     */
+    preRank(slotId: string, candidateIds: string[], k: number) {
+        const applier = new HarnessApplier();
+        const scoreItem = (slot: string, itemId: string): number => {
+            const snap = applier.snapshot();
+            try {
+                applier.equip(slot, itemId);
+                g().combat.computeAllStats();
+                const s = g().combat.player.stats;
+                const v = estimateMetric(
+                    { maxHit: s.maxHit, minHit: s.minHit, accuracy: s.accuracy, attackInterval: s.attackInterval },
+                    { hitpoints: 1, evasion: 1e9 },
+                    'kills'
+                );
+                return Number.isFinite(v) ? v : NaN;
+            } finally {
+                applier.restore(snap);
+            }
+        };
+        const provider = new PreRankingCandidateProvider(
+            new HarnessCandidateProvider({ [slotId]: candidateIds }),
+            scoreItem,
+            k
+        );
+        const scores = candidateIds.map(id => ({ id, score: scoreItem(slotId, id) }));
+        return { topK: provider.getCandidates(slotId), scores };
     },
     /** Run the real CoordinateAscentOptimizer against the live SimGame, headless. */
     async optimize(target: OptimizeTarget, candidatesBySlot: Record<string, string[]>, options: any) {

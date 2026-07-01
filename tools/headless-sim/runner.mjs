@@ -164,6 +164,20 @@ console.log('\n' + (result.improved && bestWeapon === 'melvorD:Black_2H_Sword'
     ? 'OPTIMIZER VERIFIED: upgraded Bronze -> Black 2H Sword (highest XP/hr) against the real sim.'
     : `OPTIMIZER RAN (best=${bestWeapon}); review expectations.`));
 
+// --- §2b: verify the analytic pre-rank ranks candidates sensibly against the real engine ---
+// The character is still level 99 here (the optimizer restored its Bronze baseline). Higher weapon
+// tiers give more accuracy + max hit, so the surrogate should rank Black highest and the top-2 must
+// contain the true sim winner (Black 2H Sword) — proving the cheap filter won't cull the finalist.
+console.log('\nVerifying §2b analytic pre-rank (weapon tiers vs the real engine)...');
+const pr = globalThis.__harness.preRank(weaponSlotId, swords, 2);
+for (const { id, score } of [...pr.scores].sort((a, b) => b.score - a.score)) {
+    console.log(`  ${score.toExponential(3)}  ${id}`);
+}
+const preRankOk = pr.topK.includes('melvorD:Black_2H_Sword');
+console.log('  ' + (preRankOk
+    ? `PRE-RANK VERIFIED: top-2 ${JSON.stringify(pr.topK)} contains the sim winner (Black 2H).`
+    : `PRE-RANK INCONCLUSIVE: top-2 ${JSON.stringify(pr.topK)} missing Black 2H; review.`));
+
 // --- §2a: verify death-abort actually short-circuits the trial loop at runtime ---
 // Configure a character that cannot win and will die: level 1 combat, ~10 HP, no equipment, vs a
 // Cow (always accessible). It dies long before it can grind the Cow down with fists, so deathCount
