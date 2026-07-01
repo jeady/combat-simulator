@@ -196,6 +196,11 @@ export interface LoadoutRowOptions {
      * user's currently-equipped setup). Takes precedence over {@link highlightDimId} when set.
      */
     diffFrom?: RenderedLoadout;
+    /**
+     * Render empty equipment slots as placeholders (instead of skipping them) so every row shows
+     * the same slots in the same order — keeping each gear slot at a fixed position across rows.
+     */
+    showEmpty?: boolean;
 }
 
 /** Sorted, comma-joined key for a consumable's id list, for value-comparison against a baseline. */
@@ -214,12 +219,13 @@ export function loadoutRow(loadout: RenderedLoadout, opts: LoadoutRowOptions = {
 
     Global.game.equipmentSlots.forEach(slot => {
         const itemId = loadout.equipment.get(slot.id);
-        if (!itemId) {
+        if (!itemId && !opts.showEmpty) {
             return; // compact: skip empty slots entirely
         }
         const highlight = opts.diffFrom
             ? opts.diffFrom.equipment.get(slot.id) !== itemId
             : opts.highlightDimId === slot.id;
+        // equipmentIcon renders the slot's empty silhouette when itemId is undefined.
         row.appendChild(equipmentIcon(slot.id, itemId, highlight ? ['mcs-ao-changed'] : []));
     });
 

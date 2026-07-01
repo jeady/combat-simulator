@@ -454,15 +454,19 @@ export class AutoOptimizePage extends HTMLElement {
         const loadout = choicesToLoadout(this._runDims, event.choices);
 
         const entry = createElement('div', { classList: ['mcs-ao-entry'] });
-        // Highlight every item that differs from the user's currently-equipped setup.
-        const row = loadoutRow(loadout, { diffFrom: this._baselineLoadout });
+        // Highlight every item that differs from the user's currently-equipped setup; show empty
+        // slots as placeholders so slot positions stay fixed across rows.
+        const row = loadoutRow(loadout, { diffFrom: this._baselineLoadout, showEmpty: true });
         const metric = createElement('div', {
             classList: ['mcs-ao-entry-metric'],
             text: `${this._format(event.metric)}${this._metricUnit()}`
         });
         entry.append(row, metric);
         this._feed.appendChild(entry);
-        this._feed.scrollTop = this._feed.scrollHeight;
+        // Keep only the 5 most recent bests (which, since bests only improve, are the 5 best).
+        while (this._feed.children.length > 5) {
+            this._feed.firstElementChild?.remove();
+        }
     }
 
     private _renderLeaderboard() {
@@ -473,7 +477,7 @@ export class AutoOptimizePage extends HTMLElement {
                 }
                 return this._directed(b.metric) - this._directed(a.metric);
             })
-            .slice(0, 10);
+            .slice(0, 5);
 
         // Skip the (tooltip-rebuilding) repaint when the top-10 membership/order hasn't changed.
         const sig = entries.map(entry => entry.key).join('|');
@@ -488,7 +492,7 @@ export class AutoOptimizePage extends HTMLElement {
             const row = createElement('div', { classList: ['mcs-ao-entry'] });
 
             const rank = createElement('div', { classList: ['mcs-ao-entry-rank'], text: `#${index + 1}` });
-            const icons = loadoutRow(loadout, { diffFrom: this._baselineLoadout });
+            const icons = loadoutRow(loadout, { diffFrom: this._baselineLoadout, showEmpty: true });
 
             const metricText = Number.isFinite(entry.metric) ? `${this._format(entry.metric)}${this._metricUnit()}` : '—';
             const death = entry.feasible ? '' : ` ☠${(entry.deathRate * 100).toFixed(0)}%`;
