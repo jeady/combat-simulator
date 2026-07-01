@@ -59,6 +59,13 @@ function lockedDimension(dim: Dimension): Dimension {
     return { ...dim, getCandidates: () => [] };
 }
 
+/**
+ * Minimum gap between live-view repaints (~2/sec). Candidate evaluations arrive far faster than that
+ * — and in bursts under parallel workers (a whole batch lands at once) — so the "currently evaluating"
+ * grid + leaderboard sample the most recent candidate at this cadence instead of repainting per event.
+ */
+const LIVE_RENDER_INTERVAL_MS = 500;
+
 @LoadTemplate('app/user-interface/pages/auto-optimize/auto-optimize.html')
 export class AutoOptimizePage extends HTMLElement {
     private readonly _content = new DocumentFragment();
@@ -113,7 +120,9 @@ export class AutoOptimizePage extends HTMLElement {
     private _baselineLoadout?: RenderedLoadout;
     private readonly _leaderboardMap = new Map<string, LeaderEntry>();
     private _latest?: OptimizeEvent;
-    private _renderScheduled = false;
+    /** Wall-clock of the last live-view repaint + a pending trailing-repaint timer (see _scheduleRender). */
+    private _lastRenderAt = 0;
+    private _renderTimer?: number;
     private _leaderboardSig = '';
     /** Progress-bar/ETA bookkeeping: rough total-evaluation estimate + run start time. */
     private _estimatedEvals = 1;
@@ -156,8 +165,12 @@ export class AutoOptimizePage extends HTMLElement {
 
     public disconnectedCallback() {
         // Free the pool's workers if the page element is ever torn down (the base single worker,
-        // owned by Global.simulation, is unaffected).
+        // owned by Global.simulation, is unaffected), and cancel any pending live-view repaint.
         this._teardownPool();
+        if (this._renderTimer !== undefined) {
+            clearTimeout(this._renderTimer);
+            this._renderTimer = undefined;
+        }
     }
 
     public connectedCallback() {
@@ -415,6 +428,13 @@ export class AutoOptimizePage extends HTMLElement {
 
     /** Clear and show the live-feedback panels for a fresh run. */
     private _resetLiveFeedback() {
+        // Cancel a pending trailing repaint from a prior run and reset the throttle so this run's first
+        // event (the baseline) paints immediately.
+        if (this._renderTimer !== undefined) {
+            clearTimeout(this._renderTimer);
+            this._renderTimer = undefined;
+        }
+        this._lastRenderAt = 0;
         this._leaderboardMap.clear();
         this._leaderboardSig = '';
         this._latest = undefined;
@@ -468,16 +488,30 @@ export class AutoOptimizePage extends HTMLElement {
         this._scheduleRender();
     }
 
-    /** Coalesce live-grid + leaderboard repaints to one per animation frame (events can be bursty). */
+    /**
+     * Throttle live-grid + leaderboard repaints to ~2/sec. Events can be very bursty — most of all with
+     * parallel workers, where an entire batch of candidate results resolves at once — and repainting the
+     * paper-doll grid + rebuilding the leaderboard on every event is wasted work that makes the page feel
+     * sluggish. We render the most recent candidate immediately if enough time has passed, else schedule
+     * a single trailing repaint at the interval boundary so the latest event is never dropped.
+     */
     private _scheduleRender() {
-        if (this._renderScheduled) {
-            return;
-        }
-        this._renderScheduled = true;
-        requestAnimationFrame(() => {
-            this._renderScheduled = false;
+        const now = Date.now();
+        const elapsed = now - this._lastRenderAt;
+        if (elapsed >= LIVE_RENDER_INTERVAL_MS) {
+            if (this._renderTimer !== undefined) {
+                clearTimeout(this._renderTimer);
+                this._renderTimer = undefined;
+            }
+            this._lastRenderAt = now;
             this._flushRender();
-        });
+        } else if (this._renderTimer === undefined) {
+            this._renderTimer = window.setTimeout(() => {
+                this._renderTimer = undefined;
+                this._lastRenderAt = Date.now();
+                this._flushRender();
+            }, LIVE_RENDER_INTERVAL_MS - elapsed);
+        }
     }
 
     private _flushRender() {
