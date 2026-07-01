@@ -10,6 +10,7 @@ import { PlotKey } from 'src/app/stores/plotter.store';
 import { SimulateResponse } from 'src/shared/transport/type/simulate';
 import { pruneDominated, StatVector } from 'src/app/optimizer/prune';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
+import { enumerateSummonChoices, normalizeSummonChoice, SummonChoice, summonChoicesEqual } from 'src/app/optimizer/synergy';
 import { Lookup } from 'src/shared/utils/lookup';
 import {
     CandidateProvider,
@@ -24,6 +25,11 @@ import {
 
 const EMPTY_ITEM = 'melvorD:Empty_Equipment';
 const DEBUG_ITEM = 'melvorD:DEBUG_ITEM';
+
+/** The two equipment slots that hold summon tablets — searched together by the compound synergy dim. */
+const SUMMON_SLOT_1 = 'melvorD:Summon1';
+const SUMMON_SLOT_2 = 'melvorD:Summon2';
+export const SUMMON_SLOT_IDS = new Set([SUMMON_SLOT_1, SUMMON_SLOT_2]);
 
 /** Objectives where a smaller value is better. Everything else is maximized. */
 const MINIMIZE_KEYS = new Set<PlotKey>([
@@ -435,18 +441,142 @@ function foodDimension(ownedOnly: boolean): Dimension {
     );
 }
 
+/** The human-readable familiar name for a summon tablet id (falls back to the raw id). */
+function summonName(itemId: string): string {
+    return Global.game.items.getObjectByID(itemId)?.name ?? itemId;
+}
+
+/**
+ * The summon tablet ids the character may currently equip into a summon slot: items valid for the
+ * summon slot, meeting equip requirements, optionally restricted to owned. Mirrors the filtering in
+ * {@link GameCandidateProvider} (the per-slot search uses the same rules), but collected here so the
+ * compound dimension can hand the flat id set to the pure {@link enumerateSummonChoices}. We don't
+ * run the dominance prune: a synergy familiar's value lives in its PAIR bonus (not its raw
+ * equipmentStats), so pruning by solo stats could drop exactly the familiars we need.
+ */
+function availableSummonIds(ownedOnly: boolean): Set<string> {
+    const ids = new Set<string>();
+    for (const item of Global.game.items.equipment.allObjects) {
+        if (item.id === EMPTY_ITEM || item.id === DEBUG_ITEM || item.golbinRaidExclusive) {
+            continue;
+        }
+        if (!item.validSlots.some(slot => slot.id === SUMMON_SLOT_1 || slot.id === SUMMON_SLOT_2)) {
+            continue;
+        }
+        if (!item.isModded && !Global.game.checkRequirements(item.equipRequirements, false)) {
+            continue;
+        }
+        if (ownedOnly && !isItemOwned(item.id)) {
+            continue;
+        }
+        ids.add(item.id);
+    }
+    return ids;
+}
+
+/**
+ * A COMPOUND dimension that controls BOTH summon slots at once so the optimizer can discover
+ * declared {@link SummoningSynergy} pairs that are only good TOGETHER. See `synergy.ts` for the WHY:
+ * generic coordinate ascent changes one slot at a time and would never adopt either half of a pair.
+ *
+ * - getCandidates: read `Global.game.summoning.synergies`, map each synergy's two `summons` to their
+ *   `product` (the equippable tablet) ids => declared pairs; gather the available summon ids; hand
+ *   both to the pure enumerator. The enumerator yields the empty option, every single, and every
+ *   pair whose members are both available.
+ * - applyChoice: clear both summon slots, then equip the chosen tablet(s). Wrapped in try/catch +
+ *   logger for graceful degradation (a failed apply just scores as the incumbent the optimizer
+ *   restored, rather than breaking the run), mirroring {@link settingsDimension}.
+ *
+ * NOTE: the worker recomputes `isSynergyUnlocked` from the save string on simulate, so we don't (and
+ * needn't) gate candidates on synergy-unlock here; an equipped-but-locked pair simply scores without
+ * the bonus.
+ */
+export function summonSynergyDimension(applier: GameLoadoutApplier, ownedOnly: boolean): Dimension {
+    const readChoice = (): SummonChoice => {
+        const loadout = applier.getCurrentLoadout();
+        return normalizeSummonChoice({ first: loadout.get(SUMMON_SLOT_1), second: loadout.get(SUMMON_SLOT_2) });
+    };
+
+    return {
+        id: 'summon-pair',
+        label: 'Summoning',
+        getCandidates: (): SummonChoice[] => {
+            const pairs = Global.game.summoning.synergies.map(synergy => ({
+                a: synergy.summons[0].product.id,
+                b: synergy.summons[1].product.id
+            }));
+            return enumerateSummonChoices(pairs, availableSummonIds(ownedOnly));
+        },
+        getCurrentChoice: readChoice,
+        applyChoice: (choice: unknown) => {
+            // Graceful degradation: the optimizer restored the incumbent before this call, so a
+            // failure here leaves the incumbent intact (scores as a no-op) rather than breaking the
+            // whole run. Errors are logged, not silently swallowed — mirrors settingsDimension.
+            try {
+                const normalized = normalizeSummonChoice(choice as SummonChoice);
+                // Clear both summon slots first so dropping a familiar (or swapping pairs) doesn't
+                // leave a stale tablet equipped. Uses the player-level unequip (set 0), the same
+                // set the applier's equipItem targets.
+                const player = Global.game.combat.player;
+                const slot1 = Global.game.equipmentSlots.getObjectByID(SUMMON_SLOT_1);
+                const slot2 = Global.game.equipmentSlots.getObjectByID(SUMMON_SLOT_2);
+                if (slot1) {
+                    player.unequipItem(0, slot1);
+                }
+                if (slot2) {
+                    player.unequipItem(0, slot2);
+                }
+                if (normalized.first) {
+                    applier.equip(SUMMON_SLOT_1, normalized.first);
+                }
+                if (normalized.second) {
+                    applier.equip(SUMMON_SLOT_2, normalized.second);
+                }
+            } catch (error) {
+                Global.logger.error(`Optimizer dimension 'summon-pair' failed to apply a choice`, error);
+            }
+        },
+        equals: (a: unknown, b: unknown) => summonChoicesEqual(a as SummonChoice, b as SummonChoice),
+        describe: (choice: unknown) => {
+            const normalized = normalizeSummonChoice(choice as SummonChoice);
+            if (normalized.first && normalized.second) {
+                return `${summonName(normalized.first)} + ${summonName(normalized.second)}`;
+            }
+            if (normalized.first) {
+                return summonName(normalized.first);
+            }
+            return 'no familiars';
+        }
+    };
+}
+
 /**
  * Build the optimizer's search dimensions for the live game: equipment (each slot) plus the
  * enabled consumable dimensions (food now; potion/prayers follow). The same `applier` is passed
  * to the optimizer as its SetupApplier. NOTE: consumable dimensions are type-checked and reuse
  * the verified import path, but warrant in-game verification.
+ *
+ * `summonSynergy` (default FALSE — regression-safe: with it off, the result is byte-for-byte the
+ * equipment+food set it was before) swaps the two per-slot summon dimensions for the single
+ * compound {@link summonSynergyDimension}. We EXCLUDE the summon slots from `equipmentDimensions`
+ * when it's on so the optimizer doesn't search each summon slot independently AND as a pair — the
+ * two would fight (each clobbering the other's pick).
  */
 export function buildDimensions(
     applier: GameLoadoutApplier,
     candidates: GameCandidateProvider,
-    options: { ownedOnly?: boolean; food?: boolean } = {}
+    options: { ownedOnly?: boolean; food?: boolean; summonSynergy?: boolean } = {}
 ): Dimension[] {
-    const dims = equipmentDimensions(applier, candidates, slotLabel);
+    const summonSynergy = options.summonSynergy ?? false;
+    const dims = equipmentDimensions(
+        applier,
+        candidates,
+        slotLabel,
+        summonSynergy ? SUMMON_SLOT_IDS : undefined
+    );
+    if (summonSynergy) {
+        dims.push(summonSynergyDimension(applier, options.ownedOnly ?? true));
+    }
     if (options.food ?? true) {
         dims.push(foodDimension(options.ownedOnly ?? true));
     }
