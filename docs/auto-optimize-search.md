@@ -36,22 +36,29 @@ Single sequential worker only (`Simulator` in `src/app/worker/simulator.ts`) —
 
 ## Theme 1 — Searching the right thing (search quality)
 
-### 1a. Cold-start bias
-Pass 1 decisions are made against the user's *current* gear in all other slots. A bad early commit
-can trap the search in a poor basin; extra passes only partly heal it.
-- **Fix:** multi-start / random restarts. Seed starts from: (i) current setup, (ii) best single
-  item per slot by analytic score, (iii) empty. Run coordinate ascent from each; keep the best
-  feasible basin. Configurable restart count.
+### 1a. Cold-start bias  ✅ IMPLEMENTED (2026-06-29)
+**Landed** as `multistart.ts` `multiStart(optimizer, applier, scorer, target, seeds, …)`: runs the
+optimizer from each seed (opaque `applier.snapshot()` tokens the caller supplies) and returns the best
+via a local feasibility-first compare (mirrors `optimizer.better`), restoring the original setup after.
+8 tests incl. a coupled-slot local-optimum trap that single-start can't escape. Caveat: the optimizer
+could SWAP but not UNEQUIP — now fixed (see below), which also widens the reachable basins.
 
-### 1b. Set-bonus & synergy blindness (the core limitation)
-Coordinate ascent mutates ONE dimension at a time. Items good only *together* — armor set bonuses,
-summon-familiar synergies, weapon+ammo+style+spell packages — are invisible: each piece alone scores
-worse, so it is never adopted.
-- **Fix (i): compound moves.** Detect coupled groups and add moves that swap a whole group at once
-  (e.g. full set, or summon-pair). Add these as extra "dimensions" whose candidates are group tuples.
-- **Fix (ii): annealing/GA polish.** After coordinate ascent converges, optionally run a small
-  simulated-annealing or genetic pass seeded from the incumbent to cross set-bonus ridges.
-  (Flagged in project notes as the intended mechanism for set synergies.)
+### Empty/unequip candidate (from the 1a caveat)  ✅ IMPLEMENTED (2026-07-01)
+`LoadoutApplier.unequip(slotId)` + an opt-in `includeEmpty` on `equipmentDimensions` that offers
+`null` (unequip) as a candidate; `buildDimensions` `allowEmpty` (default true for the game). Lets the
+search leave a slot empty when that beats every item (a net-negative item, or freeing a coupled slot)
+— the sim decides. Opt-in keeps existing evaluation-count assertions unchanged.
+
+### 1b. Set-bonus & synergy blindness (the core limitation)  ✅ IMPLEMENTED (2026-06-29 + 07-01)
+- **Fix (i) — declared compound moves DONE:** `synergy.ts` (pure `enumerateSummonChoices`) +
+  `summonSynergyDimension` (reads `game.summoning.synergies`) — a compound dimension over BOTH summon
+  slots so declared familiar PAIRS are adopted as one move. Behind `summonSynergy` (default off);
+  excludes the summon slots from per-slot search when on. The judgment rule: read DECLARED synergies
+  from data, never heuristic-guess.
+- **Fix (ii) — annealing polish for EMERGENT synergy DONE:** `annealing.ts` `simulatedAnnealing(…)`:
+  multi-dimension moves with feasibility-HARD / metric-SOFT (Metropolis) acceptance, seeded from a
+  setup, to cross ridges coordinate ascent can't. 5 tests incl. an emergent pair that single-move
+  search misses but annealing finds. The simulator is the judge — no heuristic synergy detection.
 
 ### 1c. Coupled-slot correctness
 Candidate legality must update when a partner slot changes:
@@ -138,15 +145,25 @@ hits**, optimizer result unchanged. App wiring type-checked; warrants in-game co
 Caveat (in cache.ts): sims are stochastic, so the cache memoizes ONE sample per key — deliberate
 (stable estimate removes noise-driven flip-flopping; the final re-score still runs fresh).
 
-### 2d. Parallel worker pool
-Base mod has ONE worker (sequential candidates). Spin up our own pool of N workers and evaluate a
-slot's candidate sweep concurrently (near-linear speedup). Biggest raw-throughput lever, most code.
-Combine with the cache (2c) for dedup across workers.
+### 2d. Parallel worker pool  ◑ CORE DONE (2026-07-01); game wiring pending
+- **Done:** `parallel.ts` `parallelMap` (pure bounded-concurrency scheduler, ≤N in flight, input
+  order; 8 tests) and `worker-pool.ts` `WorkerPool` (owns N `SimulatorLike` workers, batch-dispatches
+  via `parallelMap`, claim/return idle worker per task; 6 tests with fakes — concurrency ≤ size, work
+  spreads, order preserved). `worker-pool-factory.ts` `createWorkerPool(size)` news the real N Workers
+  (separate file so `worker-pool.ts` imports no browser globals → stays headless-testable).
+- **Pending (needs the running game):** wire the pool into the optimizer's per-slot candidate sweep
+  (a batch evaluate: generate all candidate save strings in-process, dispatch across the pool), and
+  measure the actual N-Worker speedup. Can't be verified headless — the harness sims in-process, no
+  browser `Worker`. The existing single-worker path is untouched (additive).
 
-### 2e. Adaptive trials / early statistical stop
-Start each candidate at low trials; escalate trials only for candidates statistically close to the
-incumbent (sequential test). Clear losers die after a handful of trials. Complements 2a (deaths) by
-also early-killing clear metric losers.
+### 2e. Adaptive trials / early statistical stop  ✅ IMPLEMENTED (2026-07-01)
+**Landed** as `screenTrials`/`screenKeep` in `OptimizeOptions` + a screen→confirm pass in the
+optimizer's per-slot loop: candidates are screened at `screenTrials` (low), then only the best
+`screenKeep` are confirmed at full `searchTrials`. Opt-in (`screenTrials` 0 = off); only screens when
+a slot has > `screenKeep` candidates and `screenTrials < searchTrials`. Screen evals get their own
+sound death-abort threshold; composes with pre-ranking (screens the already-top-K set) and the cache.
+Tests: finds the true optimum under screening; screens the losers cheaply while only `screenKeep`
+reach full trials; no screen when candidates ≤ `screenKeep`.
 
 ### 2f. Candidate ordering
 Order each slot's candidates by analytic score so the strongest is simmed first → stronger incumbent
