@@ -12,6 +12,7 @@ import { pruneDominated, StatVector } from 'src/app/optimizer/prune';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
 import { enumerateSummonChoices, normalizeSummonChoice, SummonChoice, summonChoicesEqual } from 'src/app/optimizer/synergy';
 import { PreRankingCandidateProvider } from 'src/app/optimizer/prerank';
+import { dedupeBySignature } from 'src/app/optimizer/dedupe';
 import { AnalyticMetric, CombatStats, estimateMetric, TargetStats } from 'src/app/optimizer/analytic-scorer';
 import { Lookup } from 'src/shared/utils/lookup';
 import {
@@ -497,14 +498,30 @@ function settingsDimension(
     };
 }
 
-/** Food dimension: the equipped combat food (owned). Applied via Settings.foodSelected. */
+/**
+ * Combat signature of a food for de-duplication. A food with any stat bonus keeps a UNIQUE signature
+ * (its buffs matter and may differ from another food's), so buffed foods are never merged. A pure-heal
+ * food (no stats) is interchangeable with any other that heals the same amount, so those collapse to a
+ * single `heal:<amount>` bucket — no point simming five identical shrimps. (`hasStats` covers
+ * modifiers / enemyModifiers / combatEffects / conditionalModifiers.)
+ */
+function foodSignature(food: any): string {
+    return food.stats?.hasStats ? `id:${food.id}` : `heal:${food.healsFor}`;
+}
+
+/** Food dimension: the equipped combat food (owned), de-duplicated to combat-distinct options. */
 function foodDimension(ownedOnly: boolean): Dimension {
     return settingsDimension(
         'food',
         'Food',
         settings => settings.foodSelected,
         (settings, value) => (settings.foodSelected = value as string),
-        () => Global.game.items.food.allObjects.map(item => item.id).filter(id => !ownedOnly || isItemOwned(id)),
+        () => {
+            const foods = Global.game.items.food.allObjects.filter(item => !ownedOnly || isItemOwned(item.id));
+            // Drop combat-identical duplicates so we don't waste sims (and don't invite a pointless
+            // recommendation to swap between interchangeable foods).
+            return dedupeBySignature(foods, foodSignature).map(item => item.id);
+        },
         choice => (choice ? Global.game.items.getObjectByID(choice as string)?.name ?? String(choice) : 'no food')
     );
 }
