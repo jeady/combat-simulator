@@ -630,19 +630,25 @@ export class SimPlayer extends Player {
             if (slot.allowQuantity && existingSlot === slot) {
                 return true;
             } else {
-                notifyPlayer(
-                    this.game.attack,
-                    templateLangString('TOASTS_ITEM_ALREADY_EQUIPPED', {
-                        itemName: item.name
-                    }),
-                    'danger'
-                );
+                // isImporting => programmatic equip (settings import / auto-optimize search): suppress
+                // the UI toast, which would otherwise flood during a search over many candidates.
+                if (!isImporting) {
+                    notifyPlayer(
+                        this.game.attack,
+                        templateLangString('TOASTS_ITEM_ALREADY_EQUIPPED', {
+                            itemName: item.name
+                        }),
+                        'danger'
+                    );
+                }
                 return false;
             }
         }
 
         if (!item.isModded && !this.game.checkRequirements(item.equipRequirements, true)) {
-            notifyPlayer(this.game.attack, 'Could not equip item due to requirements not being met.', 'danger');
+            if (!isImporting) {
+                notifyPlayer(this.game.attack, 'Could not equip item due to requirements not being met.', 'danger');
+            }
             return false;
         }
 
@@ -659,14 +665,16 @@ export class SimPlayer extends Player {
         }
 
         if (conflictingItems.length > 0) {
-            notifyPlayer(
-                this.game.attack,
-                templateLangString('TOASTS_CANNOT_EQUIP_WITH', {
-                    itemName: item.name,
-                    conflictingItemName: conflictingItems[0].name
-                }),
-                'danger'
-            );
+            if (!isImporting) {
+                notifyPlayer(
+                    this.game.attack,
+                    templateLangString('TOASTS_CANNOT_EQUIP_WITH', {
+                        itemName: item.name,
+                        conflictingItemName: conflictingItems[0].name
+                    }),
+                    'danger'
+                );
+            }
             return false;
         }
 

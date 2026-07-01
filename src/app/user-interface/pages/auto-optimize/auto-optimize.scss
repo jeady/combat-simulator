@@ -30,6 +30,12 @@
     width: 6rem;
 }
 
+.mcs-auto-optimize-hint {
+    font-size: 0.85rem;
+    line-height: 1.35;
+    max-width: 48rem;
+}
+
 .mcs-auto-optimize-status {
     font-weight: 600;
 }
@@ -44,4 +50,220 @@
         margin: 0.25rem 0 0;
         padding-left: 1.25rem;
     }
+}
+
+/* --- Search scope / lock panel --- */
+.mcs-auto-optimize-scope {
+    summary {
+        cursor: pointer;
+        font-weight: 600;
+    }
+}
+
+.mcs-auto-optimize-scope-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin: 0.5rem 0;
+}
+
+.mcs-auto-optimize-locks {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+    gap: 0.25rem 0.75rem;
+}
+
+.mcs-auto-optimize-lock-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+
+    label {
+        margin: 0;
+        cursor: pointer;
+        flex: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    &.mcs-ao-locked label {
+        opacity: 0.55;
+    }
+}
+
+/* --- Icons shared by grid, feed and leaderboard --- */
+.mcs-ao-icon {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+
+    &-img {
+        max-width: 100%;
+        max-height: 100%;
+    }
+
+    &-empty {
+        opacity: 0.4;
+    }
+
+    &.mcs-ao-changed {
+        outline: 2px solid #4f9dff;
+        border-radius: 4px;
+        background: rgba(79, 157, 255, 0.15);
+    }
+}
+
+.mcs-ao-icon-sm {
+    width: 1.5rem;
+    height: 1.5rem;
+}
+
+/* A consumable dimension (food/potion = 1 icon, a prayer set = up to 2) rendered as a group. */
+.mcs-ao-consumable-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 1px;
+    border-radius: 4px;
+
+    &.mcs-ao-changed {
+        outline: 2px solid #4f9dff;
+        background: rgba(79, 157, 255, 0.15);
+    }
+}
+
+/* --- Live "currently evaluating" grid --- */
+.mcs-auto-optimize-section-title {
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+}
+
+.mcs-auto-optimize-live-caption {
+    font-family: monospace;
+    opacity: 0.85;
+    margin-bottom: 0.4rem;
+    min-height: 1.1em;
+}
+
+/* --- Progress bar + ETA --- */
+.mcs-auto-optimize-progressbar {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.mcs-auto-optimize-progressbar-track {
+    flex: 1;
+    height: 0.6rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.1);
+    overflow: hidden;
+}
+
+.mcs-auto-optimize-progressbar-fill {
+    height: 100%;
+    width: 0;
+    border-radius: 999px;
+    background: #4f9dff;
+    transition: width 0.2s ease;
+}
+
+.mcs-auto-optimize-eta {
+    font-family: monospace;
+    opacity: 0.85;
+    white-space: nowrap;
+    min-width: 6rem;
+    text-align: right;
+}
+
+/* --- Current setup / Currently evaluating columns --- */
+.mcs-auto-optimize-live-columns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.5rem;
+}
+
+.mcs-auto-optimize-live-col {
+    flex: 1 1 16rem;
+    min-width: 0;
+}
+
+.mcs-ao-live {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 1rem;
+}
+
+.mcs-ao-grid {
+    display: grid;
+    gap: 2px;
+}
+
+.mcs-ao-consumables {
+    display: flex;
+    flex-wrap: wrap;
+    align-content: flex-start;
+    gap: 2px;
+    max-width: 8rem;
+}
+
+/* --- Feed + leaderboard rows --- */
+.mcs-auto-optimize-columns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+}
+
+.mcs-auto-optimize-feed-panel,
+.mcs-auto-optimize-leaderboard-panel {
+    flex: 1 1 20rem;
+    min-width: 0;
+}
+
+.mcs-auto-optimize-feed,
+.mcs-auto-optimize-leaderboard {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.mcs-ao-entry {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.15rem 0.25rem;
+    border-radius: 4px;
+
+    &:nth-child(odd) {
+        background: rgba(255, 255, 255, 0.03);
+    }
+}
+
+.mcs-ao-entry-rank {
+    font-family: monospace;
+    opacity: 0.7;
+    min-width: 1.5rem;
+}
+
+.mcs-ao-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1px;
+    flex: 1;
+    min-width: 0;
+}
+
+.mcs-ao-entry-metric {
+    font-family: monospace;
+    margin-left: auto;
+    white-space: nowrap;
+    text-align: right;
+}
+
+.mcs-ao-infeasible {
+    color: #e6a23c;
 }

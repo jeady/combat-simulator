@@ -12,6 +12,7 @@ import {
     Dimension,
     DimensionChange,
     DimensionChoice,
+    EventCallback,
     Evaluation,
     OptimizeOptions,
     OptimizeResult,
@@ -42,7 +43,8 @@ export class CoordinateAscentOptimizer {
         target: OptimizeTarget,
         options: Partial<OptimizeOptions> = {},
         onProgress?: ProgressCallback,
-        cancel?: CancelToken
+        cancel?: CancelToken,
+        onEvent?: EventCallback
     ): Promise<OptimizeResult> {
         const opts: OptimizeOptions = { ...DEFAULT_OPTIONS, ...options };
         const dims = this.dimensions;
@@ -73,6 +75,32 @@ export class CoordinateAscentOptimizer {
             const baselineMetric = baseEval.metric;
             const baselineDeath = baseEval.deathRate;
             let incumbentSnap = this.applier.snapshot();
+
+            // Per-dimension choices of the incumbent (the best setup so far). Updated at each commit.
+            // Lets the optimizer emit a full choice list per evaluation (incumbent + one swap) for the
+            // UI to render — cheap, no game reads. `setup` snapshots carry the conflict-resolved truth.
+            let incumbentChoices: DimensionChoice[] = baselineChoices.slice();
+
+            const emitEvent = (
+                type: 'evaluated' | 'best-improved',
+                changedIndex: number,
+                choices: DimensionChoice[],
+                evaluation: Evaluation,
+                setup?: unknown
+            ) =>
+                onEvent?.({
+                    type,
+                    choices,
+                    changedIndex,
+                    metric: evaluation.metric,
+                    deathRate: evaluation.deathRate,
+                    feasible: this.toScore(evaluation, opts.deathRateThreshold).feasible,
+                    evaluations,
+                    setup
+                });
+
+            // The baseline is the first point on the leaderboard / live view.
+            emitEvent('evaluated', -1, incumbentChoices, baseEval, incumbentSnap);
 
             const emit = (
                 phase: OptimizeResult['status'] | 'searching' | 'finalizing',
@@ -109,6 +137,7 @@ export class CoordinateAscentOptimizer {
 
                     let bestChoice = currentChoice;
                     let bestDimScore = bestScore;
+                    let bestDimEval: Evaluation | undefined;
 
                     // Candidates other than "leave as-is" (already represented by bestScore).
                     const candidates = dim.getCandidates().filter(c => !dim.equals(c, currentChoice));
@@ -121,7 +150,12 @@ export class CoordinateAscentOptimizer {
                         dim.applyChoice(choice);
                         const evaluation = await this.scorer.evaluate(target, trials, opts.searchTicks, abort);
                         evaluations++;
-                        return this.toScore(evaluation, opts.deathRateThreshold);
+                        // Emit the evaluated candidate (incumbent with this one dimension swapped) so
+                        // the UI can show it live and rank it on a leaderboard.
+                        const candidateChoices = incumbentChoices.slice();
+                        candidateChoices[i] = choice;
+                        emitEvent('evaluated', i, candidateChoices, evaluation);
+                        return { score: this.toScore(evaluation, opts.deathRateThreshold), evaluation };
                     };
 
                     // Adaptive trials (§2e): screen all candidates cheaply, then confirm only the best
@@ -136,7 +170,7 @@ export class CoordinateAscentOptimizer {
                     ) {
                         const screened: { choice: DimensionChoice; score: Score }[] = [];
                         for (const choice of candidates) {
-                            screened.push({ choice, score: await evalChoice(choice, opts.screenTrials, screenAbortThreshold) });
+                            screened.push({ choice, score: (await evalChoice(choice, opts.screenTrials, screenAbortThreshold)).score });
                             if (cancel?.cancelled) {
                                 cancelled = true;
                                 break;
@@ -152,10 +186,11 @@ export class CoordinateAscentOptimizer {
                             cancelled = true;
                             break;
                         }
-                        const score = await evalChoice(choice, opts.searchTrials, searchAbortThreshold);
+                        const { score, evaluation } = await evalChoice(choice, opts.searchTrials, searchAbortThreshold);
                         if (this.better(score, bestDimScore, opts.minImprovement, opts.significanceZ)) {
                             bestDimScore = score;
                             bestChoice = choice;
+                            bestDimEval = evaluation;
                         }
                     }
 
@@ -166,6 +201,13 @@ export class CoordinateAscentOptimizer {
                         incumbentSnap = this.applier.snapshot();
                         bestScore = bestDimScore;
                         improvedThisPass = true;
+                        // Refresh the incumbent's choices from the live state so conflict resolution
+                        // (e.g. a 2H weapon clearing the shield slot) is reflected, then announce the
+                        // new global best with the accurate snapshot for the UI's "new best" feed.
+                        incumbentChoices = dims.map(d => d.getCurrentChoice());
+                        if (bestDimEval) {
+                            emitEvent('best-improved', i, incumbentChoices, bestDimEval, incumbentSnap);
+                        }
                     }
                 }
 

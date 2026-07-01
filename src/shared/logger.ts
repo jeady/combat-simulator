@@ -25,7 +25,7 @@ export class Logger {
 
     public set(options: Partial<LoggerOptions>) {
         this.options = { ...this.options, ...options };
-        this.prefix = `[Myth] CS - ${this.options.entity} |`;
+        this.prefix = `[Serosyn] CS - ${this.options.entity} |`;
 
         this.bind();
     }

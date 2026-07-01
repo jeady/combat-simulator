@@ -559,6 +559,23 @@ function availableSummonIds(ownedOnly: boolean): Set<string> {
     return ids;
 }
 
+/** Every combat-potion item id (each tier of each combat/abyssal-combat recipe), optionally owned-only. */
+function combatPotionIds(ownedOnly: boolean): string[] {
+    const ids: string[] = [];
+    for (const recipe of Global.game.herblore.actions.allObjects) {
+        const category = recipe.category.localID;
+        if (category !== 'CombatPotions' && category !== 'AbyssalCombatPotions') {
+            continue;
+        }
+        for (const potion of recipe.potions) {
+            if (!ownedOnly || isItemOwned(potion.id)) {
+                ids.push(potion.id);
+            }
+        }
+    }
+    return ids;
+}
+
 /**
  * A COMPOUND dimension that controls BOTH summon slots at once so the optimizer can discover
  * declared {@link SummoningSynergy} pairs that are only good TOGETHER. See `synergy.ts` for the WHY:
@@ -635,17 +652,108 @@ export function summonSynergyDimension(applier: GameLoadoutApplier, ownedOnly: b
     };
 }
 
+/** Potion dimension: the active combat potion (any tier), or none. Applied via Settings.potionID. */
+function potionDimension(ownedOnly: boolean): Dimension {
+    return settingsDimension(
+        'potion',
+        'Potion',
+        settings => settings.potionID,
+        (settings, value) => (settings.potionID = (value as string) || undefined),
+        () => [undefined, ...combatPotionIds(ownedOnly)],
+        choice => (choice ? Global.game.items.getObjectByID(choice as string)?.name ?? String(choice) : 'no potion')
+    );
+}
+
+type PrayerFamily = 'normal' | 'unholy' | 'abyssal';
+
+/** Prayers can only be combined within the same family (normal / unholy / abyssal). */
+function prayerFamily(prayer: any): PrayerFamily {
+    return prayer.isUnholy ? 'unholy' : prayer.isAbyssal ? 'abyssal' : 'normal';
+}
+
 /**
- * Build the optimizer's search dimensions for the live game: equipment (each slot) plus the
- * enabled consumable dimensions (food now; potion/prayers follow). The same `applier` is passed
- * to the optimizer as its SetupApplier. NOTE: consumable dimensions are type-checked and reuse
- * the verified import path, but warrant in-game verification.
+ * A prayer is a legal choice only if its skill level is met, it works with the player's *current*
+ * damage type (weapon-dependent — so candidates are re-read as the search changes the weapon), and,
+ * for unholy prayers, the player has enough unholy-enabling items equipped.
+ */
+function isUsablePrayer(prayer: any): boolean {
+    const player = Global.game.combat.player;
+    const skillId = Global.game.prayer.id;
+    const levelOk = prayer.isAbyssal
+        ? prayer.abyssalLevel <= player.skillAbyssalLevel.get(skillId)
+        : prayer.level <= player.skillLevel.get(skillId);
+    if (!levelOk) {
+        return false;
+    }
+    if (!prayer.canUseWithDamageType(player.damageType)) {
+        return false;
+    }
+    if (prayer.isUnholy && player.modifiers.allowUnholyPrayerUse < 2) {
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Prayers as ONE dimension over valid prayer *sets* (0–2 prayers, all the same family). Modelled as
+ * a set rather than two positional slots because the game stores active prayers as an unordered list
+ * (`Settings.prayerSelected`), so positional slots would shift whenever one is cleared. Candidates
+ * are state-dependent (usable prayers depend on the equipped weapon), which the optimizer re-reads
+ * each pass. Applied via the verified `SettingsController.import` path.
+ */
+function prayerDimension(): Dimension {
+    const sortIds = (ids: string[]) => [...ids].sort();
+    const key = (choice: unknown) => (choice as string[]).join(',');
+    return {
+        id: 'prayers',
+        label: 'Prayers',
+        getCandidates: () => {
+            const usable = Global.game.prayers.allObjects.filter(isUsablePrayer);
+            const sets: string[][] = [[]]; // "no prayers" is always an option
+            for (const prayer of usable) {
+                sets.push([prayer.id]);
+            }
+            // Same-family pairs (the game caps active prayers at 2 and forbids mixing families).
+            for (let i = 0; i < usable.length; i++) {
+                for (let j = i + 1; j < usable.length; j++) {
+                    if (prayerFamily(usable[i]) === prayerFamily(usable[j])) {
+                        sets.push(sortIds([usable[i].id, usable[j].id]));
+                    }
+                }
+            }
+            return sets;
+        },
+        getCurrentChoice: () => sortIds(SettingsController.export().prayerSelected ?? []),
+        applyChoice: (choice: unknown) => {
+            try {
+                const settings = SettingsController.export();
+                settings.prayerSelected = (choice as string[]).slice();
+                SettingsController.import(settings, { notify: false });
+            } catch (error) {
+                Global.logger.error(`Optimizer dimension 'prayers' failed to apply a choice`, error);
+            }
+        },
+        equals: (a: unknown, b: unknown) => key(a) === key(b),
+        describe: (choice: unknown) => {
+            const ids = choice as string[];
+            if (!ids.length) {
+                return 'no prayers';
+            }
+            return ids.map(id => Global.game.prayers.getObjectByID(id)?.name ?? id).join(' + ');
+        }
+    };
+}
+
+/**
+ * Build the optimizer's search dimensions for the live game: equipment (each slot) plus the enabled
+ * consumable dimensions (food, potion, prayers). The same `applier` is passed to the optimizer as
+ * its SetupApplier. Non-equipment dimensions reuse the verified `SettingsController.import` path.
  *
- * `summonSynergy` (default FALSE — regression-safe: with it off, the result is byte-for-byte the
- * equipment+food set it was before) swaps the two per-slot summon dimensions for the single
- * compound {@link summonSynergyDimension}. We EXCLUDE the summon slots from `equipmentDimensions`
- * when it's on so the optimizer doesn't search each summon slot independently AND as a pair — the
- * two would fight (each clobbering the other's pick).
+ * `summonSynergy` (default FALSE — regression-safe) swaps the two per-slot summon dimensions for the
+ * single compound {@link summonSynergyDimension}, excluding the summon slots from
+ * `equipmentDimensions` so the optimizer doesn't search each summon slot independently AND as a pair.
+ * `preRankTopK` applies the analytic two-tier pre-rank (§2b); `allowEmpty` lets the search leave a
+ * slot empty when that beats every item.
  */
 export function buildDimensions(
     applier: GameLoadoutApplier,
@@ -653,12 +761,15 @@ export function buildDimensions(
     options: {
         ownedOnly?: boolean;
         food?: boolean;
+        potion?: boolean;
+        prayers?: boolean;
         summonSynergy?: boolean;
         allowEmpty?: boolean;
         /** Analytic two-tier pre-rank: keep only the top-K candidates per slot by surrogate (§2b). 0/undefined = off. */
         preRankTopK?: number;
     } = {}
 ): Dimension[] {
+    const ownedOnly = options.ownedOnly ?? true;
     const summonSynergy = options.summonSynergy ?? false;
     // Two-tier pre-rank: wrap the candidate provider so each slot only surfaces its top-K candidates
     // by the cheap analytic surrogate, and the expensive sim is spent on the finalists. A HEURISTIC
@@ -686,7 +797,13 @@ export function buildDimensions(
         dims.push(summonSynergyDimension(applier, options.ownedOnly ?? true));
     }
     if (options.food ?? true) {
-        dims.push(foodDimension(options.ownedOnly ?? true));
+        dims.push(foodDimension(ownedOnly));
+    }
+    if (options.potion ?? true) {
+        dims.push(potionDimension(ownedOnly));
+    }
+    if (options.prayers ?? true) {
+        dims.push(prayerDimension());
     }
     return dims;
 }

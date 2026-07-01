@@ -32,6 +32,7 @@ mcs-sidebar {
     }
 }
 
+.mcs-auto-optimize-sidebar,
 .mcs-found-a-bug-sidebar,
 .mcs-found-a-bug-header {
     i {
@@ -58,7 +59,8 @@ mcs-sidebar {
             }
         }
 
-        .mcs-navigation-button.mcs-found-a-bug-sidebar i {
+        .mcs-navigation-button.mcs-found-a-bug-sidebar i,
+        .mcs-navigation-button.mcs-auto-optimize-sidebar i {
             display: flex;
         }
     }
