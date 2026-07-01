@@ -9,7 +9,7 @@ import { SimulationData } from 'src/app/simulation';
 import { PlotKey } from 'src/app/stores/plotter.store';
 import { SimulateRequest, SimulateResponse } from 'src/shared/transport/type/simulate';
 import { WorkerPool } from 'src/app/optimizer/worker-pool';
-import { pruneDominated, StatVector } from 'src/app/optimizer/prune';
+import { pruneDominated, statSignature, StatVector } from 'src/app/optimizer/prune';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
 import { enumerateSummonChoices, normalizeSummonChoice, SummonChoice, summonChoicesEqual } from 'src/app/optimizer/synergy';
 import { PreRankingCandidateProvider } from 'src/app/optimizer/prerank';
@@ -440,8 +440,14 @@ export class GameCandidateProvider implements CandidateProvider {
                 plain.push({ id: item.id, stats: this.statVector(item) });
             }
         }
-        const keys = [...new Set(plain.flatMap(p => Object.keys(p.stats)))];
-        return [...special, ...pruneDominated(plain, keys).map(v => v.id)];
+        // First collapse combat-identical stat-pure items to a single representative: two effect-less
+        // items with the same stat vector sim identically, so keeping both just wastes evaluations
+        // (and lets the optimizer "recommend" a swap between equals). This also folds every item with
+        // NO combat stats into one candidate (they all share the empty signature) instead of simming
+        // each — the sim can't tell them apart. Then Pareto-prune the survivors.
+        const deduped = dedupeBySignature(plain, item => statSignature(item.stats));
+        const keys = [...new Set(deduped.flatMap(p => Object.keys(p.stats)))];
+        return [...special, ...pruneDominated(deduped, keys).map(v => v.id)];
     }
 
     /** An item whose value isn't fully captured by raw equipmentStats must not be pruned. */

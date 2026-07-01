@@ -35,6 +35,22 @@ function statValue(item: StatVector, key: string): number {
 }
 
 /**
+ * A canonical string for a stat vector, for collapsing combat-identical stat-pure items to one
+ * candidate (via {@link dedupeBySignature}). Zero-valued and absent keys are equivalent (Melvor's
+ * default is 0), so they're dropped — which means every item with NO combat stats maps to the SAME
+ * (empty) signature and folds into a single representative. Keys are sorted so equal vectors always
+ * produce byte-identical output. Only sound for items whose value is fully captured by these stats
+ * (i.e. NOT items with modifiers/special attacks/effects — the caller must exclude those).
+ */
+export function statSignature(stats: Record<string, number>): string {
+    return Object.entries(stats)
+        .filter(([, value]) => value !== 0)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, value]) => `${key}=${value}`)
+        .join(',');
+}
+
+/**
  * Does `a` strictly dominate `b` over `keys`?
  *
  * True iff `a` is >= `b` on every relevant key AND strictly > on at least one. Equal vectors

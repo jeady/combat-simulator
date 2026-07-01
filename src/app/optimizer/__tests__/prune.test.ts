@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { pruneDominated, relevantStatKeysForStyle, StatVector } from 'src/app/optimizer/prune';
+import { pruneDominated, relevantStatKeysForStyle, statSignature, StatVector } from 'src/app/optimizer/prune';
+import { dedupeBySignature } from 'src/app/optimizer/dedupe';
 
 const KEYS = ['attack', 'strength', 'defence'];
 
@@ -100,5 +101,41 @@ describe('relevantStatKeysForStyle', () => {
         for (const style of ['melee', 'ranged', 'magic'] as const) {
             expect(relevantStatKeysForStyle(style)).toContain('resistance');
         }
+    });
+});
+
+describe('statSignature (stat-identical de-duplication)', () => {
+    it('is equal for identical vectors and insensitive to key order / explicit zeros', () => {
+        expect(statSignature({ attack: 5, strength: 3 })).toBe(statSignature({ strength: 3, attack: 5 }));
+        // An explicit 0 is the same as an absent key (Melvor's default), so these collide.
+        expect(statSignature({ attack: 5, defence: 0 })).toBe(statSignature({ attack: 5 }));
+    });
+
+    it('differs when any stat differs', () => {
+        expect(statSignature({ attack: 5 })).not.toBe(statSignature({ attack: 6 }));
+        expect(statSignature({ attack: 5 })).not.toBe(statSignature({ attack: 5, strength: 1 }));
+    });
+
+    it('folds every no-combat-stat item into one candidate', () => {
+        const items: StatVector[] = [
+            { id: 'cosmeticA', stats: {} },
+            { id: 'cosmeticB', stats: { attack: 0 } }, // explicit zero == no stats
+            { id: 'real', stats: { attack: 4 } }
+        ];
+        const deduped = dedupeBySignature(items, item => statSignature(item.stats));
+        // Only the first no-stat item survives, alongside the genuinely-different one.
+        expect(ids(deduped)).toEqual(['cosmeticA', 'real']);
+    });
+
+    it('collapses combat-identical duplicates before pruning (keeps the first)', () => {
+        const items: StatVector[] = [
+            { id: 'twinA', stats: { attack: 7, strength: 2 } },
+            { id: 'twinB', stats: { strength: 2, attack: 7 } }, // identical -> interchangeable
+            { id: 'weaker', stats: { attack: 1 } }
+        ];
+        const deduped = dedupeBySignature(items, item => statSignature(item.stats));
+        const survivors = pruneDominated(deduped, ['attack', 'strength']);
+        // One of the twins collapses; the strictly-worse item is then pruned by dominance.
+        expect(ids(survivors)).toEqual(['twinA']);
     });
 });
