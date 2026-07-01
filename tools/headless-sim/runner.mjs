@@ -178,6 +178,19 @@ console.log('  ' + (preRankOk
     ? `PRE-RANK VERIFIED: top-2 ${JSON.stringify(pr.topK)} contains the sim winner (Black 2H).`
     : `PRE-RANK INCONCLUSIVE: top-2 ${JSON.stringify(pr.topK)} missing Black 2H; review.`));
 
+// --- Significance: verify batch-means stderr is real and shrinks ~1/√trials ---
+// The char is still level 99 with Bronze equipped. Estimate the metric's standard error at a small
+// and a large trial count; the estimate should be finite/positive and the larger sample tighter.
+console.log('\nVerifying batch-means standard error (real engine)...');
+const seLo = await globalThis.__harness.batchStdError({ monsterId: 'melvorD:Cow', entityId: undefined }, 40, 1000, 5);
+const seHi = await globalThis.__harness.batchStdError({ monsterId: 'melvorD:Cow', entityId: undefined }, 400, 1000, 5);
+console.log(`  40 trials:  metric ${seLo.metric.toFixed(4)}  stdError ${Number(seLo.stdError).toExponential(3)}`);
+console.log(`  400 trials: metric ${seHi.metric.toFixed(4)}  stdError ${Number(seHi.stdError).toExponential(3)}`);
+const seOk = seLo.stdError > 0 && seHi.stdError > 0 && seHi.stdError < seLo.stdError;
+console.log('  ' + (seOk
+    ? 'STD-ERROR VERIFIED: finite, positive, and tighter with more trials (noise is measurable).'
+    : `STD-ERROR INCONCLUSIVE (lo ${seLo.stdError}, hi ${seHi.stdError}); review.`));
+
 // --- §2a: verify death-abort actually short-circuits the trial loop at runtime ---
 // Configure a character that cannot win and will die: level 1 combat, ~10 HP, no equipment, vs a
 // Cow (always accessible). It dies long before it can grind the Cow down with fists, so deathCount

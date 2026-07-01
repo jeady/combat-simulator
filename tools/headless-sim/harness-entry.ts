@@ -11,6 +11,7 @@ import { Environment } from 'src/worker/context/environment';
 import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
 import { MemoizingScorer } from 'src/app/optimizer/cache';
+import { BatchingScorer } from 'src/app/optimizer/batching';
 import { PreRankingCandidateProvider } from 'src/app/optimizer/prerank';
 import { estimateMetric } from 'src/app/optimizer/analytic-scorer';
 import {
@@ -161,6 +162,16 @@ class HarnessCandidateProvider implements CandidateProvider {
         );
         const scores = candidateIds.map(id => ({ id, score: scoreItem(slotId, id) }));
         return { topK: provider.getCandidates(slotId), scores };
+    },
+    /**
+     * Significance verification: score the CURRENT setup with batch-means and return the metric +
+     * standard error at a given trial count, so we can confirm (against the real engine) that the
+     * stderr is finite/positive and SHRINKS as trials grow (~1/√trials).
+     */
+    async batchStdError(target: OptimizeTarget, trials: number, ticks: number, batches: number) {
+        const scorer = new BatchingScorer(new HarnessScorer(), batches);
+        const e = await scorer.evaluate(target, trials, ticks);
+        return { metric: e.metric, stdError: e.stdError };
     },
     /** Run the real CoordinateAscentOptimizer against the live SimGame, headless. */
     async optimize(target: OptimizeTarget, candidatesBySlot: Record<string, string[]>, options: any) {

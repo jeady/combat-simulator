@@ -5,6 +5,7 @@ import { PageController, PageId } from 'src/app/user-interface/pages/page-contro
 import { Settings, SettingsController } from 'src/app/settings-controller';
 import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
 import { MemoizingScorer, stableStringify } from 'src/app/optimizer/cache';
+import { BatchingScorer } from 'src/app/optimizer/batching';
 import {
     GameCandidateProvider,
     GameLoadoutApplier,
@@ -167,10 +168,14 @@ export class AutoOptimizePage extends HTMLElement {
         this._status.textContent = 'Running…';
 
         const applier = new GameLoadoutApplier();
-        // Memoize evaluations for this run, keyed by the applied setup (Settings snapshot). Coordinate
-        // ascent re-tests unchanged setups on convergence passes; the cache serves those without a
-        // re-sim. A fresh cache per run avoids stale entries when the target/objective changes.
-        const scorer = new MemoizingScorer(this._scorer, () => stableStringify(applier.snapshot()));
+        // Score with batch-means variance, then memoize. BatchingScorer splits each evaluation into B
+        // sub-runs to estimate the metric's standard error, which the optimizer's significance gate
+        // uses to avoid recommending noise-level swaps. The cache wraps it (keyed by the applied
+        // Settings snapshot) so convergence-pass repeats are served without re-simming.
+        const scorer = new MemoizingScorer(
+            new BatchingScorer(this._scorer),
+            () => stableStringify(applier.snapshot())
+        );
         const optimizer = new CoordinateAscentOptimizer(
             scorer,
             buildDimensions(applier, new GameCandidateProvider(true)),
