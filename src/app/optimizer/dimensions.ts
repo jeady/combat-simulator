@@ -7,13 +7,25 @@
  */
 import { CandidateProvider, Dimension, LoadoutApplier } from 'src/app/optimizer/types';
 
-/** One Dimension per equipment slot. A choice is an item id (string); empty is `null`. */
+/**
+ * One Dimension per equipment slot. A choice is an item id (string); empty is `null`.
+ *
+ * `excludeSlotIds` (default: none) drops the named slots from the result. This exists so a caller
+ * that searches certain slots via a *different* dimension can prevent the optimizer from ALSO
+ * searching them per-slot — e.g. the compound Summoning dimension owns both summon slots together,
+ * and a per-slot summon dimension would fight it (each would clobber the other's pick). The param
+ * is optional and defaults to excluding nothing, so existing callers are unaffected.
+ */
 export function equipmentDimensions(
     applier: LoadoutApplier,
     candidates: CandidateProvider,
-    label: (slotId: string) => string = slotId => slotId
+    label: (slotId: string) => string = slotId => slotId,
+    excludeSlotIds: Set<string> = new Set()
 ): Dimension[] {
-    return applier.slots().map(slot => ({
+    return applier
+        .slots()
+        .filter(slot => !excludeSlotIds.has(slot.id))
+        .map(slot => ({
         id: slot.id,
         label: label(slot.id),
         getCandidates: () => candidates.getCandidates(slot.id),
