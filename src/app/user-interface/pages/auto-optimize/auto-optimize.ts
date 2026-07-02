@@ -81,7 +81,6 @@ export class AutoOptimizePage extends HTMLElement {
     private readonly _progression: HTMLInputElement;
     private readonly _attackType: HTMLSelectElement;
     private readonly _itemPool: HTMLSelectElement;
-    private readonly _workers: HTMLInputElement;
     private readonly _run: HTMLButtonElement;
     private readonly _apply: HTMLButtonElement;
     private readonly _status: HTMLDivElement;
@@ -150,7 +149,6 @@ export class AutoOptimizePage extends HTMLElement {
         this._progression = getElementFromFragment(this._content, 'mcs-auto-optimize-progression', 'input');
         this._attackType = getElementFromFragment(this._content, 'mcs-auto-optimize-attack-type', 'select');
         this._itemPool = getElementFromFragment(this._content, 'mcs-auto-optimize-item-pool', 'select');
-        this._workers = getElementFromFragment(this._content, 'mcs-auto-optimize-workers', 'input');
         this._run = getElementFromFragment(this._content, 'mcs-auto-optimize-run', 'button');
         this._apply = getElementFromFragment(this._content, 'mcs-auto-optimize-apply', 'button');
         this._status = getElementFromFragment(this._content, 'mcs-auto-optimize-status', 'div');
@@ -206,9 +204,6 @@ export class AutoOptimizePage extends HTMLElement {
             Global.stores.optimizer.set({ attackTypeConstraint: this._attackType.value as AttackTypeConstraint });
         this._itemPool.value = Global.stores.optimizer.state.itemPool;
         this._itemPool.onchange = () => Global.stores.optimizer.set({ itemPool: this._itemPool.value as ItemPool });
-        this._workers.value = String(Global.stores.optimizer.state.workerCount);
-        this._workers.onchange = () =>
-            Global.stores.optimizer.set({ workerCount: Math.max(0, parseInt(this._workers.value, 10) || 0) });
         this._run.onclick = () => this._onRun();
         this._apply.onclick = () => this._onApply();
 
@@ -743,18 +738,15 @@ export class AutoOptimizePage extends HTMLElement {
      * so the ETA errs long and the bar jumps to 100% on completion rather than stalling past it.
      */
     /**
-     * Resolve the worker count from the store: >0 is used verbatim; 0 means "auto" — a modest count
-     * derived from the CPU, capped so we never spin up a swarm of data-loading workers. Clamped to a
-     * small ceiling because each worker holds a full copy of the game data.
+     * How many parallel sim workers to run. Chosen automatically from the CPU — there's no user knob
+     * because tuning it well needs details the UI can't surface (true core count, whether the browser
+     * under-reports, RAM headroom). Leave one core for the main thread/OS, and cap the count: each
+     * worker holds a full copy of the game data (memory), and per-dimension candidate counts rarely
+     * exceed this, so extra workers would mostly idle. On ≤2 cores this yields 1 (the serial path).
      */
     private _resolveWorkerCount(): number {
-        const requested = Global.stores.optimizer.state.workerCount;
-        if (requested > 0) {
-            return Math.min(requested, 16);
-        }
         const cores = typeof navigator !== 'undefined' && navigator.hardwareConcurrency ? navigator.hardwareConcurrency : 4;
-        // Leave a core or two for the main thread + browser; cap at 4 for the auto default.
-        return Math.max(1, Math.min(4, cores - 2));
+        return Math.max(1, Math.min(cores - 1, 12));
     }
 
     /**

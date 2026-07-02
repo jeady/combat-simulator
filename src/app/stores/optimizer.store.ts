@@ -31,13 +31,6 @@ export interface OptimizerState {
      */
     preRankTopK: number;
     /**
-     * How many parallel sim workers to run (§2d). The base mod uses a single worker; a pool of N
-     * evaluates up to N candidate loadouts at once, cutting wall-clock roughly N×. 0 = auto (pick a
-     * modest count from the CPU); 1 = the classic single-worker path. Each worker loads its own copy
-     * of the game data, so higher counts cost more memory + a one-time startup.
-     */
-    workerCount: number;
-    /**
      * Constrain the weapon search to an attack type. `current` (default) keeps the search on the
      * character's configured attack type — so optimizing a magic build won't recommend a melee weapon
      * — while `any` searches across all types. Also gates the Quiver slot (ammo only matters to a
@@ -65,7 +58,6 @@ export class OptimizerStore extends BaseStore<OptimizerState> {
             searchTicks: 1000,
             fastSearch: true,
             preRankTopK: 0,
-            workerCount: 0,
             attackTypeConstraint: 'current',
             itemPool: 'owned',
             optimizeProgression: false
