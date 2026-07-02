@@ -133,10 +133,21 @@ export class AutoOptimizePage extends HTMLElement {
     /** Wall-clock of the last live-view repaint + a pending trailing-repaint timer (see _scheduleRender). */
     private _lastRenderAt = 0;
     private _renderTimer?: number;
+    /** PageController page-change subscription, kept so disconnectedCallback can unregister it. */
+    private _onPage?: (id: PageId) => void;
     private _leaderboardSig = '';
     /** Progress-bar/ETA bookkeeping: rough total-evaluation estimate + run start time. */
     private _estimatedEvals = 1;
     private _startTime = 0;
+    /**
+     * Per-pass eval estimate + max passes, kept so the denominator can be rescaled once a pass finishes:
+     * remaining passes may not run (early convergence), so after pass P we set the total to
+     * evalsSoFar + (remaining passes × perPass) rather than trusting the up-front candidates × maxPasses.
+     */
+    private _perPassEvals = 1;
+    private _maxPasses = DEFAULT_OPTIONS.maxPasses;
+    /** Highest pass number seen from progress ticks, to detect a pass boundary and rescale once. */
+    private _lastPass = 0;
 
     constructor() {
         super();
@@ -184,6 +195,12 @@ export class AutoOptimizePage extends HTMLElement {
             clearTimeout(this._renderTimer);
             this._renderTimer = undefined;
         }
+        // PageController keeps callbacks in a static Set, so a stale one would leak (and fire against a
+        // torn-down element) until the page is rebuilt. Unregister the exact reference we stored.
+        if (this._onPage) {
+            PageController.off(this._onPage);
+            this._onPage = undefined;
+        }
     }
 
     public connectedCallback() {
@@ -218,12 +235,13 @@ export class AutoOptimizePage extends HTMLElement {
             this._renderLocks();
         };
 
-        PageController.on(id => {
+        this._onPage = id => {
             if (id === PageId.AutoOptimize) {
                 this._refreshObjective();
                 this._renderLocks();
             }
-        });
+        };
+        PageController.on(this._onPage);
 
         this._refreshObjective();
         this._renderLocks();
@@ -507,6 +525,8 @@ export class AutoOptimizePage extends HTMLElement {
             baselineDeathRate: gearResult.baselineDeathRate,
             bestMetric: progressionResult.bestMetric,
             bestDeathRate: progressionResult.bestDeathRate,
+            // The best setup is the progression run's winner, so its feasibility is that run's.
+            bestFeasible: progressionResult.bestFeasible,
             dimensionDiff: [...gearResult.dimensionDiff, ...progressionResult.dimensionDiff],
             evaluations: gearResult.evaluations + progressionResult.evaluations,
             improved: gearResult.improved || progressionResult.improved
@@ -717,26 +737,54 @@ export class AutoOptimizePage extends HTMLElement {
 
     private _renderProgress(progress: OptimizeProgress) {
         Global.stores.optimizer.set({ progress });
-        const best = Number.isFinite(progress.bestMetric) ? this._format(progress.bestMetric) : '—';
-        // The slot counter is only meaningful while searching; finalize/done emit slotIndex == slotCount.
-        const slotPart =
-            progress.phase === 'searching'
-                ? `slot ${Math.min(progress.slotIndex + 1, progress.slotCount)}/${progress.slotCount} · `
-                : '';
-        this._progress.textContent =
-            `${this._phaseLabel(progress.phase)} · pass ${progress.pass} · ` +
-            slotPart +
-            `evals ${progress.evaluations} · best ${best}`;
+
+        // When a pass completes (the reported pass advances), rescale the denominator to what's actually
+        // been run so far plus an estimate for the passes that MIGHT still run — remaining passes often
+        // don't (the search converges), so the up-front candidates × maxPasses over-counts. We keep the
+        // bar honest by re-anchoring to evalsSoFar on each boundary.
+        if (progress.pass > this._lastPass) {
+            this._lastPass = progress.pass;
+            const remainingPasses = Math.max(0, this._maxPasses - progress.pass);
+            this._estimatedEvals = Math.max(1, progress.evaluations + remainingPasses * this._perPassEvals);
+        }
 
         const done = progress.phase === 'done' || progress.phase === 'cancelled' || progress.phase === 'aborted';
+        const label = this._progressLabel(progress, done);
+        this._progress.textContent = label;
         this._updateProgressBar(progress.evaluations, done);
     }
 
     /**
-     * Rough upfront estimate of total evaluations: candidates per (searchable) dimension × max passes,
-     * plus the baseline + final re-score. An over-estimate (searches usually converge before maxPasses),
-     * so the ETA errs long and the bar jumps to 100% on completion rather than stalling past it.
+     * Honest one-line progress: what's actually known — the pass (out of an upper bound the search may
+     * not reach, hence `≤`), the dimension being searched, sims run, and observed throughput. No ETA
+     * derived from the unreliable total; the rough time estimate lives on the bar's ETA line.
      */
+    private _progressLabel(progress: OptimizeProgress, done: boolean): string {
+        if (done) {
+            const best = Number.isFinite(progress.bestMetric) ? this._format(progress.bestMetric) : '—';
+            return `${this._phaseLabel(progress.phase)} · ${progress.evaluations} sims · best ${best}`;
+        }
+
+        const parts = [`pass ${progress.pass}/≤${this._maxPasses}`];
+        // The dimension label is only meaningful while searching a slot; finalize has no active slot.
+        if (progress.phase === 'searching') {
+            const dimLabel = this._runDims[progress.slotIndex]?.label ?? progress.slotId;
+            if (dimLabel) {
+                parts.push(dimLabel);
+            }
+        } else {
+            parts.push(this._phaseLabel(progress.phase));
+        }
+        parts.push(`${progress.evaluations} sims`);
+
+        const elapsed = Date.now() - this._startTime;
+        if (progress.evaluations > 0 && elapsed > 0) {
+            const perSec = (progress.evaluations / elapsed) * 1000;
+            parts.push(`${perSec.toFixed(1)} sims/s`);
+        }
+        return parts.join(' · ');
+    }
+
     /**
      * How many parallel sim workers to run. Chosen automatically from the CPU — there's no user knob
      * because tuning it well needs details the UI can't surface (true core count, whether the browser
@@ -767,6 +815,7 @@ export class AutoOptimizePage extends HTMLElement {
             return pool;
         } catch (error) {
             Global.logger.error('Auto-optimize: worker pool failed to start; using a single worker', error);
+            this._status.textContent = 'Sim worker pool failed to start — continuing with 1 worker.';
             this._teardownPool();
             return undefined;
         }
@@ -781,6 +830,14 @@ export class AutoOptimizePage extends HTMLElement {
         }
     }
 
+    /**
+     * Rough upfront estimate of total evaluations: candidates per (searchable) dimension × max passes,
+     * plus the baseline + final re-score. This is only a starting denominator for the bar/ETA and is
+     * wrong in both directions — early convergence and cache hits run fewer passes, while the estimate
+     * ignores confirm-swap re-scores — so the bar is capped short of 100% until the run reports done,
+     * and the per-pass figure is kept so a finished pass can rescale the denominator (see _renderProgress).
+     * Records `_perPassEvals`/`_maxPasses` and resets the pass tracker as a side effect.
+     */
     private _estimateEvals(): number {
         // With fast search, a slot that has more than screenKeep candidates pays a screen eval for
         // each candidate plus a confirm eval for the screenKeep survivors — so count both, otherwise
@@ -792,11 +849,19 @@ export class AutoOptimizePage extends HTMLElement {
             const withConfirm = fastSearch && candidates > screenKeep ? candidates + screenKeep : candidates;
             return sum + withConfirm;
         }, 0);
-        return Math.max(1, perPass * DEFAULT_OPTIONS.maxPasses + 2);
+        this._perPassEvals = Math.max(1, perPass);
+        this._maxPasses = DEFAULT_OPTIONS.maxPasses;
+        this._lastPass = 0;
+        return Math.max(1, perPass * this._maxPasses + 2);
     }
 
     private _updateProgressBar(evaluations: number, done: boolean) {
-        const fraction = done ? 1 : Math.min(0.99, evaluations / this._estimatedEvals);
+        // Cap the displayed progress at 95% until the run actually reports done: the denominator is a
+        // rough estimate that can be over- or under-shot, and a bar that sits at 100% (or overshoots)
+        // while sims are still running reads as stalled. Only `done` (or cancelled/aborted) fills it.
+        // Guard against a NaN/Infinity estimate (0-candidate dimensions) so the width stays well-formed.
+        const ratio = this._estimatedEvals > 0 ? evaluations / this._estimatedEvals : 0;
+        const fraction = done ? 1 : Math.min(0.95, Number.isFinite(ratio) ? Math.max(0, ratio) : 0);
         this._progressBarFill.style.width = `${(fraction * 100).toFixed(1)}%`;
 
         if (done) {
@@ -808,18 +873,20 @@ export class AutoOptimizePage extends HTMLElement {
         if (evaluations > 0 && elapsed > 0) {
             const perEval = elapsed / evaluations;
             const remaining = Math.max(0, this._estimatedEvals - evaluations) * perEval;
-            this._progressEta.textContent = `ETA ${this._formatEta(remaining)}`;
+            // The time is a rough guess off an unreliable total, so label it `~` (see _formatEta).
+            this._progressEta.textContent = `~${this._formatEta(remaining)}`;
         } else {
             this._progressEta.textContent = '';
         }
     }
 
+    /** Format a duration as "12s" or "3m 05s". Callers prepend `~` to mark it a rough estimate. */
     private _formatEta(ms: number): string {
         const seconds = Math.max(0, Math.ceil(ms / 1000));
         if (seconds < 60) {
-            return `~${seconds}s`;
+            return `${seconds}s`;
         }
-        return `~${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
+        return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
     }
 
     private _renderResult(result: OptimizeResult) {
