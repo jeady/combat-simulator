@@ -4,7 +4,7 @@
  * (`optimizer.ts`) depends only on the interfaces in `types.ts`.
  */
 import { Global } from 'src/app/global';
-import { SettingsController, Settings } from 'src/app/settings-controller';
+import { SettingsController, Settings, AgilitySettings } from 'src/app/settings-controller';
 import { SimulationData } from 'src/app/simulation';
 import { PlotKey } from 'src/app/stores/plotter.store';
 import { ItemPool } from 'src/app/stores/optimizer.store';
@@ -1191,6 +1191,96 @@ function auroraSpellDimension(): Dimension {
         book => book?.allowAuroras !== false,
         'no aurora'
     );
+}
+
+/** True if the LIVE character has mastered (level ≥ 99) the given obstacle — mirrors getAgility. */
+function obstacleMastered(obstacleId: string): boolean {
+    const obstacle = Global.melvor.agility.actions.getObjectByID(obstacleId);
+    return obstacle ? (Global.melvor.agility.actionMastery.get(obstacle)?.level ?? 0) >= 99 : false;
+}
+
+/**
+ * One agility-course dimension: the obstacle built in a given category `slot` on `realmId`, or none.
+ * Candidates are the obstacles in that category the LIVE character meets the level requirement for
+ * (the sim maxes agility + unlocks every slot, so we gate on the real character instead — the analog
+ * of the "craftable" gear pool). Applied by rewriting that category's entry in `Settings.agility`
+ * and re-importing, exactly like {@link settingsDimension} but into the nested agility structure.
+ */
+function agilityObstacleDimension(realmId: string, category: number): Dimension {
+    const readChoice = (): string => {
+        const course = SettingsController.export().agility?.find(c => c.realmId === realmId);
+        const entry = course?.obstacles.find(([, cat]) => cat === category);
+        return entry ? entry[0] : '';
+    };
+    return {
+        id: `agility-${category}`,
+        label: `Agility Obstacle ${category + 1}`,
+        getCandidates: (): string[] => {
+            const level = Global.melvor.agility.level ?? 1;
+            const abyssalLevel = Global.melvor.agility.abyssalLevel ?? 0;
+            const ids = Global.game.agility.actions.allObjects
+                .filter((o: any) => o.category === category && o.realm?.id === realmId)
+                .filter((o: any) => o.level <= level && (!o.abyssalLevel || abyssalLevel >= o.abyssalLevel))
+                .map((o: any) => o.id);
+            return ['', ...ids]; // '' = leave the slot empty
+        },
+        getCurrentChoice: readChoice,
+        applyChoice: (choice: unknown) => {
+            // Graceful degradation like settingsDimension: a failed apply leaves the incumbent intact.
+            try {
+                const obstacleId = (choice as string) ?? '';
+                const settings = SettingsController.export();
+                if (!settings.agility) {
+                    settings.agility = [];
+                }
+                let course = settings.agility.find(c => c.realmId === realmId);
+                if (!course) {
+                    course = { realmId, obstacles: [], pillars: [] } as AgilitySettings;
+                    settings.agility.push(course);
+                }
+                // Replace this category's obstacle (drop the old entry, add the new one unless "none").
+                course.obstacles = course.obstacles.filter(([, cat]) => cat !== category);
+                if (obstacleId) {
+                    course.obstacles.push([obstacleId, category, obstacleMastered(obstacleId)]);
+                }
+                SettingsController.import(settings, { notify: false });
+            } catch (error) {
+                Global.logger.error(`Optimizer dimension 'agility-${category}' failed to apply a choice`, error);
+            }
+        },
+        equals: (a: unknown, b: unknown) => ((a as string) ?? '') === ((b as string) ?? ''),
+        describe: (choice: unknown) => {
+            const id = choice as string;
+            return id ? Global.game.agility.actions.getObjectByID(id)?.name ?? id : 'none';
+        }
+    };
+}
+
+/**
+ * Agility search dimensions for a realm: one per obstacle category the LIVE character has BOTH
+ * unlocked (`numObstaclesUnlocked`) and can build at least one obstacle in. Empty when the character
+ * hasn't unlocked any obstacle slots on this realm, so the staged agility pass simply no-ops. Realm
+ * is the target monster's realm (courses are per-realm and the sim fights in one).
+ */
+export function agilityDimensions(realmId: string): Dimension[] {
+    const realm = Global.game.realms.getObjectByID(realmId);
+    const course = realm ? Global.game.agility.courses.get(realm) : undefined;
+    if (!course) {
+        return [];
+    }
+    // The sim unlocks every slot; respect the real character's unlocked count for a realistic search.
+    const liveRealm = Global.melvor.realms.getObjectByID(realmId);
+    const unlocked = (liveRealm ? Global.melvor.agility.courses.get(liveRealm)?.numObstaclesUnlocked : 0) ?? 0;
+    const dims: Dimension[] = [];
+    const slots = Math.min(course.obstacleSlots.length, unlocked);
+    for (let category = 0; category < slots; category++) {
+        const dim = agilityObstacleDimension(realmId, category);
+        // Only search a category that has at least one buildable obstacle beyond "none".
+        if (dim.getCandidates().length > 1) {
+            dims.push(dim);
+        }
+    }
+    return dims;
 }
 
 /**

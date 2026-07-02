@@ -10,6 +10,7 @@ import { createWorkerPool } from 'src/app/optimizer/worker-pool-factory';
 import { AttackTypeConstraint } from 'src/app/optimizer/weapon-rules';
 import { ItemPool } from 'src/app/stores/optimizer.store';
 import {
+    agilityDimensions,
     GameCandidateProvider,
     GameLoadoutApplier,
     GameScorer,
@@ -25,6 +26,7 @@ import {
     Dimension,
     DimensionChoice,
     OptimizeEvent,
+    OptimizeOptions,
     OptimizePhase,
     OptimizeProgress,
     OptimizeResult,
@@ -75,6 +77,7 @@ export class AutoOptimizePage extends HTMLElement {
     private readonly _objective: HTMLDivElement;
     private readonly _searchTrials: HTMLInputElement;
     private readonly _fastSearch: HTMLInputElement;
+    private readonly _agility: HTMLInputElement;
     private readonly _attackType: HTMLSelectElement;
     private readonly _itemPool: HTMLSelectElement;
     private readonly _workers: HTMLInputElement;
@@ -143,6 +146,7 @@ export class AutoOptimizePage extends HTMLElement {
         this._objective = getElementFromFragment(this._content, 'mcs-auto-optimize-objective', 'div');
         this._searchTrials = getElementFromFragment(this._content, 'mcs-auto-optimize-search-trials', 'input');
         this._fastSearch = getElementFromFragment(this._content, 'mcs-auto-optimize-fast-search', 'input');
+        this._agility = getElementFromFragment(this._content, 'mcs-auto-optimize-agility', 'input');
         this._attackType = getElementFromFragment(this._content, 'mcs-auto-optimize-attack-type', 'select');
         this._itemPool = getElementFromFragment(this._content, 'mcs-auto-optimize-item-pool', 'select');
         this._workers = getElementFromFragment(this._content, 'mcs-auto-optimize-workers', 'input');
@@ -193,6 +197,8 @@ export class AutoOptimizePage extends HTMLElement {
         this._searchTrials.value = String(Global.stores.optimizer.state.searchTrials);
         this._fastSearch.checked = Global.stores.optimizer.state.fastSearch;
         this._fastSearch.onchange = () => Global.stores.optimizer.set({ fastSearch: this._fastSearch.checked });
+        this._agility.checked = Global.stores.optimizer.state.optimizeAgility;
+        this._agility.onchange = () => Global.stores.optimizer.set({ optimizeAgility: this._agility.checked });
         this._attackType.value = Global.stores.optimizer.state.attackTypeConstraint;
         this._attackType.onchange = () =>
             Global.stores.optimizer.set({ attackTypeConstraint: this._attackType.value as AttackTypeConstraint });
@@ -401,28 +407,39 @@ export class AutoOptimizePage extends HTMLElement {
         const optimizer = new CoordinateAscentOptimizer(scorer, this._runDims, applier);
         const sim = Global.stores.simulator.state;
 
+        const runOptions = {
+            searchTrials,
+            // Ticks are the per-kill budget, not a "search is cheaper" knob — cutting them below the
+            // user's Simulate setting starves slow kills and fails every sim (baseline included) for
+            // any target that needs >searchTicks to die. Speed comes from fewer trials; never let the
+            // search tick budget drop below sim.ticks.
+            searchTicks: Math.max(Global.stores.optimizer.state.searchTicks, sim.ticks),
+            finalTrials: sim.trials,
+            finalTicks: sim.ticks,
+            // Fast search: screen every candidate at a quarter of the search trials, then confirm only
+            // the best few at full trials. The optimizer skips the screen pass automatically for slots
+            // that have ≤ screenKeep candidates (no benefit there).
+            screenTrials: fastSearch ? Math.max(10, Math.floor(searchTrials / 4)) : 0,
+            screenKeep: 3
+        };
+
         try {
-            const result = await optimizer.run(
+            let result = await optimizer.run(
                 target,
-                {
-                    searchTrials,
-                    // Ticks are the per-kill budget, not a "search is cheaper" knob — cutting them
-                    // below the user's Simulate setting starves slow kills and fails every sim
-                    // (baseline included) for any target that needs >searchTicks to die. Speed comes
-                    // from fewer trials; never let the search tick budget drop below sim.ticks.
-                    searchTicks: Math.max(Global.stores.optimizer.state.searchTicks, sim.ticks),
-                    finalTrials: sim.trials,
-                    finalTicks: sim.ticks,
-                    // Fast search: screen every candidate at a quarter of the search trials, then
-                    // confirm only the best few at full trials. The optimizer skips the screen pass
-                    // automatically for slots that have ≤ screenKeep candidates (no benefit there).
-                    screenTrials: fastSearch ? Math.max(10, Math.floor(searchTrials / 4)) : 0,
-                    screenKeep: 3
-                },
+                runOptions,
                 progress => this._renderProgress(progress),
                 cancel,
                 event => this._onEvent(event)
             );
+            // Staged agility pass (opt-in): once the gear/consumable search has a usable result, tune
+            // the agility course ON TOP of the best gear. Runs only if there's something to optimize.
+            if (
+                Global.stores.optimizer.state.optimizeAgility &&
+                !cancel.cancelled &&
+                Number.isFinite(result.baselineMetric)
+            ) {
+                result = await this._runAgilityPass(applier, scorer, target, runOptions, cancel, result);
+            }
             this._result = result;
             Global.stores.optimizer.set({ result });
             this._renderResult(result);
@@ -435,6 +452,70 @@ export class AutoOptimizePage extends HTMLElement {
             this._run.disabled = false;
             this._run.textContent = 'Run Optimization';
         }
+    }
+
+    /**
+     * Second, staged optimization pass: tune the agility course for the target's realm on top of the
+     * best gear the main search found. Reuses the same optimizer engine, scorer (cache/pool), and run
+     * options — just a different Dimension[]. Returns a MERGED result (original baseline → best gear +
+     * best agility, with both diffs concatenated). No-ops back to `gearResult` when there's no realm or
+     * no unlocked/level-appropriate obstacle slots. Deliberately runs without the live-event callback:
+     * agility choices don't map onto the equipment paper-doll, so the live grid/feed stay on the gear
+     * result while a "Optimizing agility course…" status + progress bar convey the second phase.
+     */
+    private async _runAgilityPass(
+        applier: GameLoadoutApplier,
+        scorer: MemoizingScorer,
+        target: OptimizeTarget,
+        runOptions: Partial<OptimizeOptions>,
+        cancel: CancelToken,
+        gearResult: OptimizeResult
+    ): Promise<OptimizeResult> {
+        const monster = Global.game.monsters.getObjectByID(target.monsterId);
+        const realmId = monster ? Global.game.getMonsterArea(monster).realm?.id : undefined;
+        if (!realmId) {
+            return gearResult;
+        }
+
+        // Tune agility on the winning build: apply the best gear before searching obstacles.
+        applier.restore(gearResult.bestSetup);
+        const agilityDims = agilityDimensions(realmId);
+        if (agilityDims.length === 0) {
+            applier.restore(gearResult.baselineSetup); // nothing to do — leave the user's setup as it was
+            return gearResult;
+        }
+
+        const gearDims = this._runDims;
+        this._status.textContent = 'Optimizing agility course…';
+        this._runDims = agilityDims;
+        this._estimatedEvals = this._estimateEvals();
+        this._startTime = Date.now();
+
+        const agilityResult = await new CoordinateAscentOptimizer(scorer, agilityDims, applier).run(
+            target,
+            runOptions,
+            progress => this._renderProgress(progress),
+            cancel
+        );
+
+        // Restore the user's original setup (the gear run's finally restored it before we applied best
+        // gear; the agility run's finally left best-gear+current-agility) and the gear dims for render.
+        applier.restore(gearResult.baselineSetup);
+        this._runDims = gearDims;
+
+        // Merge: original baseline → best gear + best agility, diffs concatenated.
+        return {
+            status: agilityResult.status,
+            baselineSetup: gearResult.baselineSetup,
+            bestSetup: agilityResult.bestSetup,
+            baselineMetric: gearResult.baselineMetric,
+            baselineDeathRate: gearResult.baselineDeathRate,
+            bestMetric: agilityResult.bestMetric,
+            bestDeathRate: agilityResult.bestDeathRate,
+            dimensionDiff: [...gearResult.dimensionDiff, ...agilityResult.dimensionDiff],
+            evaluations: gearResult.evaluations + agilityResult.evaluations,
+            improved: gearResult.improved || agilityResult.improved
+        };
     }
 
     private _onApply() {
