@@ -299,6 +299,14 @@ describe('GameCandidateProvider.getCandidates', () => {
         expect(new GameCandidateProvider('all', 'any').getCandidates(WEAPON_SLOT).sort()).toEqual(
             ['magicStaff', 'meleeSword', 'rangedBow'].sort()
         );
+
+        // A CONCRETE constraint ignores the live player entirely — this is what pins "keep current
+        // attack type" for multi-start runs, where seed randomization can flip the live attack type
+        // (e.g. a random shield unequips a random 2H, leaving the seed unarmed => melee).
+        const built3 = buildGame(items);
+        built3.player.attackType = 'melee';
+        setGame(built3);
+        expect(new GameCandidateProvider('all', 'ranged').getCandidates(WEAPON_SLOT)).toEqual(['rangedBow']);
     });
 
     it('drops weapons whose damage type the target is immune to; non-weapons are never filtered', () => {

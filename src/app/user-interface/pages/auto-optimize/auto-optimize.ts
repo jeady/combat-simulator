@@ -476,7 +476,16 @@ export class AutoOptimizePage extends HTMLElement {
         // ones are wrapped so the search never varies them. `preRankTopK` (default 0 = off) narrows
         // each equipment slot to its top-K analytic candidates before any real sim runs.
         const preRankTopK = Global.stores.optimizer.state.preRankTopK;
-        const attackTypeConstraint = Global.stores.optimizer.state.attackTypeConstraint;
+        // Resolve 'current' to the player's CONCRETE attack type once, at run start. The provider
+        // otherwise re-resolves 'current' against the LIVE player on every getCandidates call — and
+        // with multi-start restarts, seed randomization can leave a seed unarmed (a random shield
+        // unequips a random 2H), flipping the live attack type to melee and letting that seed's whole
+        // search hunt weapons of the wrong type.
+        const storedConstraint = Global.stores.optimizer.state.attackTypeConstraint;
+        const attackTypeConstraint: AttackTypeConstraint =
+            storedConstraint === 'current'
+                ? (Global.game.combat.player.attackType as AttackTypeConstraint) ?? 'current'
+                : storedConstraint;
         const itemPool = Global.stores.optimizer.state.itemPool;
         // Consumables (food/potion/summons) follow the same pool at the coarse owned-vs-all level:
         // 'owned' and 'craftable' keep them owned-only (craftability is a gear concept), 'all' opens
