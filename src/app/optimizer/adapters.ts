@@ -1284,6 +1284,46 @@ export function agilityDimensions(realmId: string): Dimension[] {
 }
 
 /**
+ * Cartography search dimension: which discovered Point of Interest the character stands on (its
+ * `activeStats` are applied to combat while positioned there). One dimension over the ACTIVE world
+ * map's POIs — candidates are the discovered POIs that grant stats, plus "none" (starting location).
+ * Empty (so no dimension) when Atlas of Discovery isn't active, there's no active map, or the
+ * character hasn't discovered any stat-granting POI. Applied via the verified `SettingsController`
+ * path (a single `cartographyPointOfInterest` field), so it's a plain {@link settingsDimension}.
+ */
+export function cartographyDimensions(): Dimension[] {
+    if (!Global.game.cartography?.activeMap) {
+        return []; // AoD not active / no active map
+    }
+    const dim = settingsDimension(
+        'cartography-poi',
+        'Cartography POI',
+        settings => settings.cartographyPointOfInterest ?? '',
+        (settings, value) => (settings.cartographyPointOfInterest = (value as string) || ''),
+        () => {
+            const map = Global.game.cartography?.activeMap;
+            if (!map) {
+                return [''];
+            }
+            const liveMap = Global.melvor.cartography?.activeMap;
+            const ids = map.pointsOfInterest.allObjects
+                // Only POIs that actually buff combat, and only ones the live character has discovered.
+                .filter((poi: any) => poi.activeStats?.hasStats)
+                .filter((poi: any) => liveMap?.pointsOfInterest.getObjectByID(poi.id)?.isDiscovered ?? false)
+                .map((poi: any) => poi.id);
+            return ['', ...ids]; // '' = starting location / no POI
+        },
+        choice =>
+            choice
+                ? Global.game.cartography?.activeMap?.pointsOfInterest.getObjectByID(choice as string)?.name ??
+                  String(choice)
+                : 'no POI'
+    );
+    // Only worth a dimension when there's a discovered stat-POI to consider beyond "none".
+    return dim.getCandidates().length > 1 ? [dim] : [];
+}
+
+/**
  * Build the optimizer's search dimensions for the live game: equipment (each slot) plus the enabled
  * consumable dimensions (food, potion, prayers) and spell dimensions (attack spell, curse, aurora).
  * The same `applier` is passed to the optimizer as its SetupApplier. Non-equipment dimensions reuse

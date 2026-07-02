@@ -47,11 +47,12 @@ export interface OptimizerState {
     /** Which items the equipment search may draw from (owned / owned+craftable / all). */
     itemPool: ItemPool;
     /**
-     * When true, a second optimization pass tunes the agility course (obstacles on the target's realm)
-     * on top of the best gear, after the main search finishes. Off by default to keep the main run
-     * lean. See the staged-pass wiring in the auto-optimize page.
+     * When true, a second optimization pass tunes character-progression combat levers — the agility
+     * course (obstacles on the target's realm) and the cartography Point of Interest — on top of the
+     * best gear, after the main search finishes. Off by default to keep the main run lean. See the
+     * staged-pass wiring in the auto-optimize page.
      */
-    optimizeAgility: boolean;
+    optimizeProgression: boolean;
     progress?: OptimizeProgress;
     result?: OptimizeResult;
 }
@@ -67,7 +68,7 @@ export class OptimizerStore extends BaseStore<OptimizerState> {
             workerCount: 0,
             attackTypeConstraint: 'current',
             itemPool: 'owned',
-            optimizeAgility: false
+            optimizeProgression: false
         });
     }
 }

@@ -11,6 +11,7 @@ import { AttackTypeConstraint } from 'src/app/optimizer/weapon-rules';
 import { ItemPool } from 'src/app/stores/optimizer.store';
 import {
     agilityDimensions,
+    cartographyDimensions,
     GameCandidateProvider,
     GameLoadoutApplier,
     GameScorer,
@@ -77,7 +78,7 @@ export class AutoOptimizePage extends HTMLElement {
     private readonly _objective: HTMLDivElement;
     private readonly _searchTrials: HTMLInputElement;
     private readonly _fastSearch: HTMLInputElement;
-    private readonly _agility: HTMLInputElement;
+    private readonly _progression: HTMLInputElement;
     private readonly _attackType: HTMLSelectElement;
     private readonly _itemPool: HTMLSelectElement;
     private readonly _workers: HTMLInputElement;
@@ -146,7 +147,7 @@ export class AutoOptimizePage extends HTMLElement {
         this._objective = getElementFromFragment(this._content, 'mcs-auto-optimize-objective', 'div');
         this._searchTrials = getElementFromFragment(this._content, 'mcs-auto-optimize-search-trials', 'input');
         this._fastSearch = getElementFromFragment(this._content, 'mcs-auto-optimize-fast-search', 'input');
-        this._agility = getElementFromFragment(this._content, 'mcs-auto-optimize-agility', 'input');
+        this._progression = getElementFromFragment(this._content, 'mcs-auto-optimize-progression', 'input');
         this._attackType = getElementFromFragment(this._content, 'mcs-auto-optimize-attack-type', 'select');
         this._itemPool = getElementFromFragment(this._content, 'mcs-auto-optimize-item-pool', 'select');
         this._workers = getElementFromFragment(this._content, 'mcs-auto-optimize-workers', 'input');
@@ -197,8 +198,9 @@ export class AutoOptimizePage extends HTMLElement {
         this._searchTrials.value = String(Global.stores.optimizer.state.searchTrials);
         this._fastSearch.checked = Global.stores.optimizer.state.fastSearch;
         this._fastSearch.onchange = () => Global.stores.optimizer.set({ fastSearch: this._fastSearch.checked });
-        this._agility.checked = Global.stores.optimizer.state.optimizeAgility;
-        this._agility.onchange = () => Global.stores.optimizer.set({ optimizeAgility: this._agility.checked });
+        this._progression.checked = Global.stores.optimizer.state.optimizeProgression;
+        this._progression.onchange = () =>
+            Global.stores.optimizer.set({ optimizeProgression: this._progression.checked });
         this._attackType.value = Global.stores.optimizer.state.attackTypeConstraint;
         this._attackType.onchange = () =>
             Global.stores.optimizer.set({ attackTypeConstraint: this._attackType.value as AttackTypeConstraint });
@@ -431,14 +433,14 @@ export class AutoOptimizePage extends HTMLElement {
                 cancel,
                 event => this._onEvent(event)
             );
-            // Staged agility pass (opt-in): once the gear/consumable search has a usable result, tune
-            // the agility course ON TOP of the best gear. Runs only if there's something to optimize.
+            // Staged progression pass (opt-in): once the gear/consumable search has a usable result,
+            // tune agility + cartography ON TOP of the best gear. Runs only if there's something to do.
             if (
-                Global.stores.optimizer.state.optimizeAgility &&
+                Global.stores.optimizer.state.optimizeProgression &&
                 !cancel.cancelled &&
                 Number.isFinite(result.baselineMetric)
             ) {
-                result = await this._runAgilityPass(applier, scorer, target, runOptions, cancel, result);
+                result = await this._runProgressionPass(applier, scorer, target, runOptions, cancel, result);
             }
             this._result = result;
             Global.stores.optimizer.set({ result });
@@ -455,15 +457,16 @@ export class AutoOptimizePage extends HTMLElement {
     }
 
     /**
-     * Second, staged optimization pass: tune the agility course for the target's realm on top of the
-     * best gear the main search found. Reuses the same optimizer engine, scorer (cache/pool), and run
-     * options — just a different Dimension[]. Returns a MERGED result (original baseline → best gear +
-     * best agility, with both diffs concatenated). No-ops back to `gearResult` when there's no realm or
-     * no unlocked/level-appropriate obstacle slots. Deliberately runs without the live-event callback:
-     * agility choices don't map onto the equipment paper-doll, so the live grid/feed stay on the gear
-     * result while a "Optimizing agility course…" status + progress bar convey the second phase.
+     * Second, staged optimization pass: tune character-progression combat levers — the agility course
+     * for the target's realm and the cartography Point of Interest — on top of the best gear the main
+     * search found. Reuses the same optimizer engine, scorer (cache/pool), and run options — just a
+     * different Dimension[]. Returns a MERGED result (original baseline → best gear + best progression,
+     * with both diffs concatenated). No-ops back to `gearResult` when there's nothing to tune (no realm,
+     * no unlocked obstacle slots, no discovered stat-POI). Deliberately runs without the live-event
+     * callback: these choices don't map onto the equipment paper-doll, so the live grid/feed stay on
+     * the gear result while a "Optimizing agility & cartography…" status + progress bar convey the phase.
      */
-    private async _runAgilityPass(
+    private async _runProgressionPass(
         applier: GameLoadoutApplier,
         scorer: MemoizingScorer,
         target: OptimizeTarget,
@@ -473,25 +476,22 @@ export class AutoOptimizePage extends HTMLElement {
     ): Promise<OptimizeResult> {
         const monster = Global.game.monsters.getObjectByID(target.monsterId);
         const realmId = monster ? Global.game.getMonsterArea(monster).realm?.id : undefined;
-        if (!realmId) {
-            return gearResult;
-        }
 
-        // Tune agility on the winning build: apply the best gear before searching obstacles.
+        // Tune progression on the winning build: apply the best gear before searching.
         applier.restore(gearResult.bestSetup);
-        const agilityDims = agilityDimensions(realmId);
-        if (agilityDims.length === 0) {
+        const progressionDims = [...(realmId ? agilityDimensions(realmId) : []), ...cartographyDimensions()];
+        if (progressionDims.length === 0) {
             applier.restore(gearResult.baselineSetup); // nothing to do — leave the user's setup as it was
             return gearResult;
         }
 
         const gearDims = this._runDims;
-        this._status.textContent = 'Optimizing agility course…';
-        this._runDims = agilityDims;
+        this._status.textContent = 'Optimizing agility & cartography…';
+        this._runDims = progressionDims;
         this._estimatedEvals = this._estimateEvals();
         this._startTime = Date.now();
 
-        const agilityResult = await new CoordinateAscentOptimizer(scorer, agilityDims, applier).run(
+        const progressionResult = await new CoordinateAscentOptimizer(scorer, progressionDims, applier).run(
             target,
             runOptions,
             progress => this._renderProgress(progress),
@@ -499,22 +499,22 @@ export class AutoOptimizePage extends HTMLElement {
         );
 
         // Restore the user's original setup (the gear run's finally restored it before we applied best
-        // gear; the agility run's finally left best-gear+current-agility) and the gear dims for render.
+        // gear; this run's finally left best-gear+current-progression) and the gear dims for render.
         applier.restore(gearResult.baselineSetup);
         this._runDims = gearDims;
 
-        // Merge: original baseline → best gear + best agility, diffs concatenated.
+        // Merge: original baseline → best gear + best progression, diffs concatenated.
         return {
-            status: agilityResult.status,
+            status: progressionResult.status,
             baselineSetup: gearResult.baselineSetup,
-            bestSetup: agilityResult.bestSetup,
+            bestSetup: progressionResult.bestSetup,
             baselineMetric: gearResult.baselineMetric,
             baselineDeathRate: gearResult.baselineDeathRate,
-            bestMetric: agilityResult.bestMetric,
-            bestDeathRate: agilityResult.bestDeathRate,
-            dimensionDiff: [...gearResult.dimensionDiff, ...agilityResult.dimensionDiff],
-            evaluations: gearResult.evaluations + agilityResult.evaluations,
-            improved: gearResult.improved || agilityResult.improved
+            bestMetric: progressionResult.bestMetric,
+            bestDeathRate: progressionResult.bestDeathRate,
+            dimensionDiff: [...gearResult.dimensionDiff, ...progressionResult.dimensionDiff],
+            evaluations: gearResult.evaluations + progressionResult.evaluations,
+            improved: gearResult.improved || progressionResult.improved
         };
     }
 
