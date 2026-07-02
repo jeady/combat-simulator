@@ -53,6 +53,8 @@ interface LeaderEntry {
     metric: number;
     deathRate: number;
     feasible: boolean;
+    /** Standard error of {@link metric}, if the scorer estimated it; used for the noise-tie `≈` marker. */
+    stdError?: number;
 }
 
 /**
@@ -258,9 +260,16 @@ export class AutoOptimizePage extends HTMLElement {
         const supported = isSupportedObjective();
         const targetSupported = isSupportedTarget(target);
 
+        // A setup "passes" the survival constraint by never dying across the (low) search-trial count,
+        // but that's a sample: the true death rate can still be non-zero. The one-sided 95% upper bound
+        // for observing zero deaths in N trials is ~3/N (the rule of three), so surface it honestly.
+        const searchTrials = Math.max(1, Global.stores.optimizer.state.searchTrials);
+        const trueRate = ((3 / searchTrials) * 100).toFixed(1);
+
         this._objective.innerHTML = `
             <div><strong>Objective:</strong> ${plot.text}${unit} (${direction})</div>
             <div><strong>Target:</strong> ${targetName}</div>
+            <div class="text-muted">Survival constraint: no deaths tolerated (checked over ${searchTrials} search trials — a setup passing this can still have a true death rate up to ~${trueRate}%).</div>
             ${
                 supported
                     ? ''
@@ -599,7 +608,8 @@ export class AutoOptimizePage extends HTMLElement {
                 choices: event.choices,
                 metric: event.metric,
                 deathRate: event.deathRate,
-                feasible: event.feasible
+                feasible: event.feasible,
+                stdError: event.stdError
             });
         }
 
@@ -702,6 +712,7 @@ export class AutoOptimizePage extends HTMLElement {
         this._leaderboardSig = sig;
 
         this._leaderboard.innerHTML = '';
+        const leader = entries[0];
         entries.forEach((entry, index) => {
             const loadout = choicesToLoadout(this._runDims, entry.choices);
             const row = createElement('div', { classList: ['mcs-ao-entry'] });
@@ -709,12 +720,28 @@ export class AutoOptimizePage extends HTMLElement {
             const rank = createElement('div', { classList: ['mcs-ao-entry-rank'], text: `#${index + 1}` });
             const icons = loadoutRow(loadout, { diffFrom: this._baselineLoadout, showEmpty: true });
 
+            // Flag entries that trail #1 by less than a one-sided 95% band on the difference of the two
+            // noisy estimates (1.645·√(se₁²+se₂²)): their gap is within simulation noise, so the ranking
+            // between them isn't real. Skip #1 itself and any entry (or leader) missing a stdError.
+            const withinNoise =
+                index > 0 &&
+                leader.stdError !== undefined &&
+                entry.stdError !== undefined &&
+                Number.isFinite(leader.metric) &&
+                Number.isFinite(entry.metric) &&
+                this._directed(leader.metric) - this._directed(entry.metric) <
+                    1.645 * Math.hypot(leader.stdError, entry.stdError);
+
             const metricText = Number.isFinite(entry.metric) ? `${this._format(entry.metric)}${this._metricUnit()}` : '—';
             const death = entry.feasible ? '' : ` ☠${(entry.deathRate * 100).toFixed(0)}%`;
+            const tie = withinNoise ? ' ≈' : '';
             const metric = createElement('div', {
                 classList: entry.feasible ? ['mcs-ao-entry-metric'] : ['mcs-ao-entry-metric', 'mcs-ao-infeasible'],
-                text: metricText + death
+                text: metricText + death + tie
             });
+            if (withinNoise) {
+                metric.title = 'within simulation noise of #1';
+            }
 
             row.append(rank, icons, metric);
             this._leaderboard.appendChild(row);
@@ -909,10 +936,24 @@ export class AutoOptimizePage extends HTMLElement {
         this._status.textContent =
             result.status === 'cancelled' ? 'Cancelled — showing the best found so far.' : 'Done.';
 
-        const baseline = this._format(result.baselineMetric);
-        const best = this._format(result.bestMetric);
+        // Show each metric with its Monte-Carlo standard error (`± se`) so the reader can judge whether
+        // baseline→best is a real gain or within noise; omit the `±` where the scorer couldn't estimate it.
+        const unit = this._metricUnit();
+        const baseline = this._formatWithError(result.baselineMetric, result.baselineStdError, unit);
+        const best = this._formatWithError(result.bestMetric, result.bestStdError, unit);
 
-        let html = `<div><strong>Baseline:</strong> ${baseline}</div><div><strong>Best:</strong> ${best}</div>`;
+        let html =
+            `<div class="mcs-auto-optimize-section-title">Best setup found (local search — not guaranteed optimal)</div>` +
+            `<div>baseline ${baseline} &rarr; best ${best}</div>`;
+
+        // A recommendation that survived the low-fidelity search but DIED at full trials is dangerous —
+        // it looks safe but isn't. Warn unmissably above Apply (which stays enabled — the user decides).
+        if (result.improved && result.bestFeasible === false) {
+            html +=
+                `<div class="mcs-auto-optimize-warn"><strong>⚠ At full fidelity this setup died ` +
+                `(death rate ${(result.bestDeathRate * 100).toFixed(1)}%) despite surviving the search trials. ` +
+                `Treat with caution.</strong></div>`;
+        }
 
         if (!result.improved) {
             html += `<div>No improvement found over your current setup.</div>`;
@@ -985,6 +1026,19 @@ export class AutoOptimizePage extends HTMLElement {
             return '—';
         }
         return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    }
+
+    /**
+     * Format a metric with its standard error and unit for the results panel: `1,234 ± 56 /h`. The
+     * `± se` is omitted when the scorer couldn't estimate it (undefined/non-finite stdError); a
+     * non-finite metric renders as an em dash with no unit.
+     */
+    private _formatWithError(value: number, stdError: number | undefined, unit: string): string {
+        if (!Number.isFinite(value)) {
+            return '—';
+        }
+        const error = stdError !== undefined && Number.isFinite(stdError) ? ` ± ${this._format(stdError)}` : '';
+        return `${this._format(value)}${error}${unit}`;
     }
 }
 
