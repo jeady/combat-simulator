@@ -172,8 +172,13 @@ export class LiveLoadoutGrid {
         this.element.append(this.grid, this.consumablesRow);
     }
 
-    /** Repaint to show `loadout`, optionally flagging one slot as the one being tested. */
-    public update(loadout: RenderedLoadout, highlightSlotId?: string) {
+    /**
+     * Repaint to show `loadout`. `highlightSlotId` flags the single slot being tested (the live
+     * view); `diffFrom` instead highlights EVERY slot/consumable whose choice differs from that
+     * reference loadout (the completed-run "best setup" view). `diffFrom` takes precedence,
+     * matching {@link loadoutRow}'s semantics.
+     */
+    public update(loadout: RenderedLoadout, highlightSlotId?: string, diffFrom?: RenderedLoadout) {
         Global.game.equipmentSlots.forEach(slot => {
             const entry = this.cells.get(slot.id);
             if (!entry) {
@@ -185,13 +190,17 @@ export class LiveLoadoutGrid {
             ImageLoader.register(entry.img, item ? item.media : slot.emptyMedia);
             entry.tooltip.innerHTML = item ? EquipmentController.getEquipmentTooltip(item) : slot.localID;
             entry.cell.classList.toggle('mcs-ao-icon-empty', !item);
-            entry.cell.classList.toggle('mcs-ao-changed', slot.id === highlightSlotId);
+            const changed = diffFrom ? diffFrom.equipment.get(slot.id) !== itemId : slot.id === highlightSlotId;
+            entry.cell.classList.toggle('mcs-ao-changed', changed);
         });
 
         this.consumablesRow.innerHTML = '';
         for (const consumable of loadout.consumables) {
-            const classes = consumable.id === highlightSlotId ? ['mcs-ao-changed'] : [];
-            this.consumablesRow.appendChild(consumableGroup(consumable, classes));
+            const baseline = diffFrom?.consumables.find(entry => entry.id === consumable.id);
+            const changed = diffFrom
+                ? consumableKey(baseline?.itemIds ?? []) !== consumableKey(consumable.itemIds)
+                : consumable.id === highlightSlotId;
+            this.consumablesRow.appendChild(consumableGroup(consumable, changed ? ['mcs-ao-changed'] : []));
         }
     }
 }

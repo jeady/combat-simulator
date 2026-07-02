@@ -777,7 +777,18 @@ export class AutoOptimizePage extends HTMLElement {
 
         this._latest = event;
         if (event.type === 'best-improved') {
-            this._bestEvent = event;
+            // With restarts, every seed emits its own best-improved chain; keep the best ACROSS seeds
+            // (feasible first, then directed metric — the leaderboard's order) so the completed-run
+            // panel shows the run's true winner, not just the last seed to improve.
+            const prev = this._bestEvent;
+            const isBetter =
+                !prev ||
+                (event.feasible !== prev.feasible
+                    ? event.feasible
+                    : this._directed(event.metric) > this._directed(prev.metric));
+            if (isBetter) {
+                this._bestEvent = event;
+            }
             this._appendFeed(event);
         }
         this._scheduleRender();
@@ -1166,7 +1177,9 @@ export class AutoOptimizePage extends HTMLElement {
                 ? choicesToLoadout(this._runDims, this._bestEvent.choices)
                 : this._baselineLoadout;
         if (loadout && this._liveGrid) {
-            this._liveGrid.update(loadout);
+            // Highlight every slot that differs from the user's current setup, like the new-best feed
+            // rows do (diffing baseline against itself in the unchanged case highlights nothing).
+            this._liveGrid.update(loadout, undefined, this._baselineLoadout);
         }
         const metric = Number.isFinite(result.bestMetric)
             ? `${this._format(result.bestMetric)}${this._metricUnit()}`
