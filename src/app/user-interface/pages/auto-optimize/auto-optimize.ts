@@ -157,6 +157,8 @@ export class AutoOptimizePage extends HTMLElement {
     private _renderTimer?: number;
     /** PageController page-change subscription, kept so disconnectedCallback can unregister it. */
     private _onPage?: (id: PageId) => void;
+    /** The target the active run captured at start; pins the header while the run is in flight. */
+    private _runTarget?: OptimizeTarget;
     private _leaderboardSig = '';
     /** Progress-bar/ETA bookkeeping: rough total-evaluation estimate + run start time. */
     private _estimatedEvals = 1;
@@ -273,10 +275,15 @@ export class AutoOptimizePage extends HTMLElement {
         this._renderLocks();
     }
 
-    /** Show the current objective + target (read live from the Simulate page selections). */
+    /**
+     * Show the current objective + target. Read live from the Simulate page selections when idle;
+     * while a run is active, show the target the RUN captured — the live plotter selection can be
+     * deselected mid-run (clicking around the Simulate page), and re-rendering "None selected" while
+     * the search is visibly fighting that very target reads as a bug.
+     */
     private _refreshObjective() {
         const plot = Global.stores.plotter.plotType;
-        const target = getSelectedTarget();
+        const target = this._runTarget ?? getSelectedTarget();
         const targetName = this._targetName(target);
         // plot.text already ends with "per" for time metrics (e.g. "XP per"), so only append the unit.
         const unit = plot.isTime ? ` ${Global.stores.plotter.timeShorthand}` : '';
@@ -412,6 +419,8 @@ export class AutoOptimizePage extends HTMLElement {
 
         const cancel: CancelToken = { cancelled: false };
         this._cancel = cancel;
+        this._runTarget = target;
+        this._refreshObjective();
         this._result = undefined;
         this._apply.disabled = true;
         this._results.innerHTML = '';
@@ -541,6 +550,8 @@ export class AutoOptimizePage extends HTMLElement {
         } finally {
             Global.stores.optimizer.set({ isRunning: false });
             this._cancel = undefined;
+            this._runTarget = undefined;
+            this._refreshObjective();
             this._run.disabled = false;
             this._run.textContent = 'Run Optimization';
         }
