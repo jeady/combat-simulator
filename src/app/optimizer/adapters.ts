@@ -1233,6 +1233,35 @@ function auroraSpellDimension(): Dimension {
     );
 }
 
+/**
+ * Attack style as ONE dimension over the styles legal for the CURRENT weapon's attack type (stab /
+ * slash / block for melee, the ranged/magic variants otherwise). The game keeps one selected style per
+ * attack type in `Settings.styles` ({ melee, ranged, magic }); only the entry matching the player's
+ * present attack type is live, so this dimension reads/writes THAT key and re-reads the legal set each
+ * pass (the search changes the weapon, and thus the attack type). Mirrors the config page's attack-style
+ * dropdown (`_setAttackStyleDropdown`): candidates are `attackStyles` whose `attackType` equals the
+ * player's current one. Applied via the verified `SettingsController.import` path.
+ */
+function attackStyleDimension(): Dimension {
+    const styleKey = () => Global.game.combat.player.attackType as keyof Settings['styles'];
+    return settingsDimension(
+        'attack-style',
+        'Attack Style',
+        settings => settings.styles[styleKey()],
+        (settings, value) => (settings.styles[styleKey()] = value as string),
+        () => {
+            const attackType = Global.game.combat.player.attackType;
+            const current = SettingsController.export().styles[styleKey()];
+            const ids = Global.game.attackStyles.allObjects
+                .filter((style: any) => style.attackType === attackType)
+                .map((style: any) => style.id);
+            // Keep "leave as-is" reachable even if the current style somehow isn't in the legal set.
+            return ids.includes(current) ? ids : [current, ...ids];
+        },
+        choice => Global.game.attackStyles.getObjectByID(choice as string)?.name ?? String(choice)
+    );
+}
+
 /** True if the LIVE character has mastered (level ≥ 99) the given obstacle — mirrors getAgility. */
 function obstacleMastered(obstacleId: string): boolean {
     const obstacle = Global.melvor.agility.actions.getObjectByID(obstacleId);
@@ -1384,6 +1413,7 @@ export function buildDimensions(
         food?: boolean;
         potion?: boolean;
         prayers?: boolean;
+        attackStyle?: boolean;
         attackSpell?: boolean;
         curse?: boolean;
         aurora?: boolean;
@@ -1424,6 +1454,9 @@ export function buildDimensions(
     }
     if (options.prayers ?? true) {
         dims.push(prayerDimension());
+    }
+    if (options.attackStyle ?? true) {
+        dims.push(attackStyleDimension());
     }
     if (options.attackSpell ?? true) {
         dims.push(attackSpellDimension());
