@@ -34,8 +34,10 @@ for a chosen target and objective, instead of making the player try combinations
 | --- | --- |
 | **Objective** | Reuse the mod's existing *skill* + *plot type* metric selectors as the scoring function. Add a per-metric **maximize/minimize** direction flag. |
 | **Survival** | **Death rate is a hard constraint, not just a metric** — optimize the chosen metric only among loadouts that reliably survive. |
-| **Search scope** | Gear, agility obstacles, prayers/potions/food, attack style + spells/runes, **summoning familiars**, **cartography** — each included only as the sim actually models it. |
-| **Item pool** | UI **toggle**: *owned/usable-only* (from the live save) vs *all items in game* (from raw game data). Same engine, different candidate provider. |
+| **Targets** | A single monster, a dungeon/entity, OR a **slayer task**. A slayer task isn't one simulatable entity: the scorer sims each accessible task monster individually (through the worker pool when present) and averages them, exactly as the Simulate chart does. The task id may arrive in either `monsterId` (dropdown pick) or `entityId` (inspect), so both are checked (`slayerTaskTargetId`); a task with no reachable monster is unsupported. |
+| **Search scope** | Gear (each slot, incl. attack-style, summon-synergy pairs), prayers/potions/food, attack spell/curse/aurora — searched together in the main pass; **agility obstacles** + **cartography** in an opt-in staged progression pass — each included only as the sim actually models it. |
+| **Item pool** | UI **tri-state**: *owned* (ever-found, from the live save), *craftable* (owned OR a high enough skill level to craft — the level check only), or *all items in game* (raw game data). Same engine, one `ItemPool` arg to the candidate provider. Consumables follow the coarse owned-vs-all split (`itemPool !== 'all'`). |
+| **Attack type** | The weapon search is constrained to the character's *current* attack type by default (a magic build isn't handed a melee weapon); `any` searches every type. Also gates the Quiver slot, and the applier auto-fits compatible ammo when it equips a ranged weapon so ranged candidates sim fairly. |
 | **UI** | New "Auto-Optimize" panel. Separately, **simplify the existing (confusing) objective-selector UI**. |
 
 ## 4. The core problem
@@ -44,37 +46,55 @@ Brute force is impossible: ~13 gear slots × hundreds of items, plus agility/pra
 potions/food/style/spells/familiars/cartography → an astronomically large product.
 The design makes it tractable with a **two-tier scorer** and a **smart search**.
 
-### Two-tier scoring
+### Scoring — how it actually shipped
 
-Common interface: `evaluate(loadout) -> { metric, deathRate }`.
+The original two-tier plan cast the analytic surrogate as the BROAD-search scorer. That is **not**
+what was built. As implemented:
 
-1. **Tier 1 — analytic surrogate (no Monte Carlo).** Estimate the selected metric from
-   `CombatManager`-derived deterministic stats (max hit, accuracy, attack interval,
-   damage reduction, …). Thousands of evals/sec — used for the broad search.
-2. **Tier 2 — full stochastic sim.** The existing worker simulation. Accurate but slow —
-   used only on the top-K finalists to get true metric + death rate.
+1. **The full stochastic sim is the scorer for the whole search**, not just a top-K finalist stage.
+   Every candidate at every rung is a real worker sim; `GameScorer.evaluate` reads the same plotted
+   metric + death rate the Simulate chart uses. Speed comes from fewer *trials* (two-tier
+   `searchTrials`→`finalTrials` fidelity) and a successive-halving ladder, not from a cheaper scorer.
+2. **The analytic surrogate is a per-slot pre-FILTER, not a scorer.** `analytic-scorer.ts` +
+   `makeGameScoreItem` rank a slot's candidates against a fixed nominal target and keep only the
+   top-K before any sim runs (`PreRankingCandidateProvider`). It never produces a `{metric,
+   deathRate}` an accept decision is made on — the sim always has the final say. It is **off by
+   default** (`preRankTopK = 0`); `fastSearch` low-trial screening (real sims) is the preferred
+   default narrowing. See `docs/auto-optimize-search.md` §2b.
 
 ### Candidate pruning
 
-Per dimension: pick source (owned/all) → filter by usability (level/slot/style) →
-drop **dominated** options (strictly worse in all relevant stats than another).
+Per dimension: pick source (owned / craftable / all) → filter by usability (level/slot/style/
+attack-type) → collapse combat-identical stat-pure items to one representative (`dedupeBySignature`)
+→ drop **dominated** options (Pareto-worse across all relevant stats, with lower-is-better keys like
+attackSpeed projected onto a uniform axis first). Items with special effects are never pruned.
 
-### Search engine
+### Search engine (as built)
 
-- **MVP:** coordinate ascent (optimize one slot at a time, iterate) + random restarts.
-- **Later:** genetic algorithm / simulated annealing to handle **set bonuses and
-  special-weapon synergies**, which trap naive greedy search.
-- Enforces hard constraints (survive; mutually-exclusive choices; ammo/style/rune
-  consistency), caches evaluated loadouts, respects a time/evaluation budget, and runs
-  evaluations across a **worker pool we create**. ⚠️ The base mod has only **one
-  sequential worker** — there is no pool to reuse (see §9.5). Real parallelism requires
-  instantiating multiple `Worker`s ourselves.
+- **Shipped:** coordinate ascent (optimize one dimension at a time, iterate up to `maxPasses`) +
+  optional random restarts (`multiStart`, wired behind the "Restarts" control).
+- Enforces hard constraints (survive — death rate is feasibility-dominant; mutually-exclusive
+  choices; ammo/style/rune consistency), caches evaluated loadouts (`MemoizingScorer`), and runs
+  evaluations across a **worker pool we create** (`WorkerPool`, auto-sized) — the base mod has only
+  one sequential worker (§9.5), so we instantiate our own. **✗ NOT built:** a time/evaluation budget
+  (the run bounds itself by `maxPasses` + candidate counts, not a wall-clock/eval cap).
+- **✗ NOT built:** a genetic algorithm. Simulated annealing (`annealing.ts`) IS built and tested but
+  **NOT wired** into the UI (experimental; superseded in priority by multi-start + the compound
+  summon dimension). See `docs/auto-optimize-search.md` §1b(ii).
 
 ### Orchestration
 
-Analytic search narrows the space → full-sim the top-K → report the best loadout **with
-each slot's marginal contribution** and a **diff vs the player's current gear**, so the
-result is explainable.
+Coordinate ascent (optionally multi-start) narrows to a best loadout, then a full-fidelity re-score
+confirms it (`finalTrials`/`finalTicks`) and sets `bestFeasible`. The result reports a **diff vs the
+player's current gear** (`dimensionDiff`) with baseline/best metric ± standard error. **✗ NOT built:**
+per-slot **marginal-contribution** reporting — the result carries the from→to diff per dimension but
+not each dimension's isolated metric contribution.
+
+An **opt-in staged progression pass** runs after the gear/consumable search: it tunes the agility
+course (for the target monster's realm) and the cartography Point of Interest ON TOP of the winning
+gear, reusing the same optimizer/scorer/pool with a different `Dimension[]`, and returns a merged
+result (baseline → best gear + best progression, diffs concatenated). No-ops when there's nothing to
+tune. Gated by `optimizeProgression` (default off). See `auto-optimize.ts` `_runProgressionPass`.
 
 ## 5. Architecture (modules)
 
@@ -93,13 +113,20 @@ UI                   Auto-Optimize panel (target, objective, item-pool toggle, c
   established the Firefox dev-load loop, and mapped the code seams (evaluate entry point,
   loadout data shape, owned-items source, metric + death-rate readout). Still to do within
   P0: pin/confirm game v1.3.1 in the live client.
-- **P1 — MVP.** Gear-only, owned items, full-sim scoring, single target, coordinate-ascent
-  search. Proves the loop end-to-end.
-- **P2 — Make it fast.** Analytic surrogate + candidate pruning + worker parallelism + caching.
-- **P3 — Expand dimensions.** Agility, prayers/potions/food, style/spells/runes, familiars,
-  cartography; owned/all toggle.
-- **P4 — Search quality & UX.** GA/restarts for set bonuses, survive-constraint handling,
-  results-explanation UI, and the objective-selector simplification.
+- **P1 — MVP. ✅.** Gear, owned items, full-sim scoring, single target, coordinate-ascent search.
+  Proves the loop end-to-end.
+- **P2 — Make it fast. ✅ (mostly).** Candidate pruning + dedupe, worker parallelism (auto-sized
+  pool), caching, successive-halving screening, death-abort, and the analytic pre-rank FILTER all
+  landed. The analytic surrogate is a per-slot pre-filter (off by default), not the broad scorer as
+  originally framed — see §4.
+- **P3 — Expand dimensions. ✅.** Agility (staged pass), prayers/potions/food, attack
+  style/spells/curses/auroras, summoning familiars (incl. declared synergy pairs), cartography
+  (staged pass); tri-state owned/craftable/all pool.
+- **P4 — Search quality & UX. ◑.** Restarts (multi-start) for cold-start local optima, survive-
+  constraint handling, and the results-explanation UI (diff, ± standard error, feasibility/noise
+  warnings) all landed. **NOT built:** a genetic algorithm, per-slot marginal-contribution
+  reporting, a time/eval budget; simulated annealing is built+tested but not wired. The
+  objective-selector simplification is out of this feature's scope.
 
 ## 7. Open questions / risks
 

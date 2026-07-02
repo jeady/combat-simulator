@@ -1,8 +1,10 @@
 # Auto-Optimize: Search Correctness & Performance Plan
 
-Status: planning doc (2026-06-29). Companion to `docs/auto-optimize.md` (architecture/seams).
+Status: living doc (updated 2026-07-02). Companion to `docs/auto-optimize.md` (architecture/seams).
 Scope: make the optimizer (a) search the *right* space — the joint combination of all
-slots/dimensions — and (b) do so fast enough to be usable. No code landed from this doc yet.
+slots/dimensions — and (b) do so fast enough to be usable. Most of this doc has now LANDED (see the
+per-section ✅/◑/✗ status markers); the annealing polish (1b(ii)) and candidate ordering (2f) are
+the notable not-wired / not-built items.
 
 ---
 
@@ -23,25 +25,43 @@ Already implemented and relevant:
 - **Dominance pruning** (`prune.ts`, wired in `GameCandidateProvider`): per slot, drops items that
   are Pareto-dominated on the relevant combat stats. This is the sound, general form of
   "Steel beats Bronze, skip Bronze." Never prunes items with special effects
-  (modifiers/enemyModifiers/conditionalModifiers/specialAttacks/combatEffects).
+  (modifiers/enemyModifiers/conditionalModifiers/specialAttacks/combatEffects). Lower-is-better keys
+  (attackSpeed) are projected onto a uniform higher-is-better axis before the prune
+  (`directStatsForDominance`) so a slower-but-otherwise-equal weapon is never wrongly dropped.
 - **Two-tier fidelity:** `searchTrials/searchTicks` during the sweep, `finalTrials/finalTicks` to
   re-score the winner.
 - **Death-as-hard-constraint:** `optimizer.better()` makes `feasible` (deathRate ≤ threshold)
   dominate the metric; infeasible setups are compared by who is closer to surviving.
 
-Built but NOT wired: the analytic DPS surrogate (`analytic-scorer.ts`).
-Single sequential worker only (`Simulator` in `src/app/worker/simulator.ts`) — no pool.
+Analytic DPS surrogate (`analytic-scorer.ts`): the pure core AND the game-backed pre-rank deriver
+are both built. `deriveCombatStats` + `makeGameScoreItem` (`adapters.ts`) equip a candidate on the
+current background, recompute stats, and score it against a fixed nominal target (`PRERANK_TARGET =
+{ hitpoints: 1, evasion: 1e9 }`, which reduces the surrogate to a monotonic gear-quality proxy).
+It is a per-slot pre-FILTER, wired through `PreRankingCandidateProvider` and gated by
+`preRankTopK` — which defaults to **0 (off)**; the UI prefers `fastSearch` low-trial screening as
+the safer narrowing mechanism. So the surrogate is built and wired but off by default, NOT unused.
+
+Worker pool: WIRED and auto-sized. `auto-optimize.ts` builds a `WorkerPool` (via
+`createWorkerPool`) sized to `min(cores-1, 12)` from `navigator.hardwareConcurrency` (1 on ≤2
+cores = the serial path), reused across runs. `GameScorer(batches, minTrialsPerBatch, pool)`
+exposes the parallel `evaluateBatch` when a pool is present; the optimizer fans a dimension's
+candidates across it. The single-worker `Simulator` path still exists and is used pool-less.
 
 ---
 
 ## Theme 1 — Searching the right thing (search quality)
 
-### 1a. Cold-start bias  ✅ IMPLEMENTED (2026-06-29)
+### 1a. Cold-start bias  ✅ IMPLEMENTED + WIRED (2026-06-29; wired 2026-07-01)
 **Landed** as `multistart.ts` `multiStart(optimizer, applier, scorer, target, seeds, …)`: runs the
 optimizer from each seed (opaque `applier.snapshot()` tokens the caller supplies) and returns the best
 via a local feasibility-first compare (mirrors `optimizer.better`), restoring the original setup after.
 8 tests incl. a coupled-slot local-optimum trap that single-start can't escape. Caveat: the optimizer
 could SWAP but not UNEQUIP — now fixed (see below), which also widens the reachable basins.
+**WIRED into the UI:** the "Restarts: 1/3/5" control (`optimizer.store.restarts`, default 1) drives
+seed construction in `auto-optimize.ts` (`current` + `random-i` seeds from a seeded mulberry32 over
+the unlocked dimensions) and the `multiStart(...)` call. `restarts === 1` deliberately calls
+`optimizer.run` directly (byte-identical to the pre-multistart path), so the extra machinery is only
+engaged when the user asks for restarts.
 
 ### Empty/unequip candidate (from the 1a caveat)  ✅ IMPLEMENTED (2026-07-01)
 `LoadoutApplier.unequip(slotId)` + an opt-in `includeEmpty` on `equipmentDimensions` that offers
@@ -50,15 +70,21 @@ search leave a slot empty when that beats every item (a net-negative item, or fr
 — the sim decides. Opt-in keeps existing evaluation-count assertions unchanged.
 
 ### 1b. Set-bonus & synergy blindness (the core limitation)  ✅ IMPLEMENTED (2026-06-29 + 07-01)
-- **Fix (i) — declared compound moves DONE:** `synergy.ts` (pure `enumerateSummonChoices`) +
+- **Fix (i) — declared compound moves DONE + WIRED:** `synergy.ts` (pure `enumerateSummonChoices`) +
   `summonSynergyDimension` (reads `game.summoning.synergies`) — a compound dimension over BOTH summon
-  slots so declared familiar PAIRS are adopted as one move. Behind `summonSynergy` (default off);
-  excludes the summon slots from per-slot search when on. The judgment rule: read DECLARED synergies
-  from data, never heuristic-guess.
-- **Fix (ii) — annealing polish for EMERGENT synergy DONE:** `annealing.ts` `simulatedAnnealing(…)`:
-  multi-dimension moves with feasibility-HARD / metric-SOFT (Metropolis) acceptance, seeded from a
-  setup, to cross ridges coordinate ascent can't. 5 tests incl. an emergent pair that single-move
-  search misses but annealing finds. The simulator is the judge — no heuristic synergy detection.
+  slots so declared familiar PAIRS are adopted as one move. Behind `summonSynergy`, which defaults
+  **ON**. It is **ADDITIVE**: the two per-slot summon dimensions are ALWAYS searched (never excluded)
+  and optimally handle solos + additive non-synergy pairs; the compound dimension only ADDS what they
+  can't reach — the empty baseline and the declared synergy pairs (`enumerateSummonChoices(pairs,
+  ids, /*includeSingles=*/false)`). Cost is ~one extra evaluation per declared pair. The judgment
+  rule: read DECLARED synergies from data, never heuristic-guess.
+- **Fix (ii) — annealing polish for EMERGENT synergy: BUILT + TESTED, NOT WIRED (experimental):**
+  `annealing.ts` `simulatedAnnealing(…)`: multi-dimension moves with feasibility-HARD / metric-SOFT
+  (Metropolis) acceptance, seeded from a setup, to cross ridges coordinate ascent can't. 5 tests
+  incl. an emergent pair that single-move search misses but annealing finds. The simulator is the
+  judge — no heuristic synergy detection. It is **not imported by the UI** — superseded in priority
+  by multi-start (1a, wired) + the compound summon dimension (fix (i), wired), which together cover
+  the synergy cases that motivated it. Left in the tree as an experimental option to wire later.
 
 ### 1c. Coupled-slot correctness
 Candidate legality must update when a partner slot changes:
@@ -110,7 +136,7 @@ wasted work. Large speedup on the (many) candidates that die.
 - **Reporting:** when aborted early, deathRate is a lower bound, not exact — flag the result so the
   UI/optimizer treats it as "infeasible (aborted)" rather than a precise rate.
 
-### 2b. Analytic two-tier pre-rank  ◑ PURE CORE DONE (2026-06-29); deriver pending
+### 2b. Analytic two-tier pre-rank  ✅ IMPLEMENTED (pure core 2026-06-29; deriver 2026-07-01)
 Rank a slot's surviving candidates by the closed-form DPS surrogate (`analytic-scorer.ts`), full-sim
 only the top-K. Turns "full-sim every owned item" into "full-sim the few that could win."
 - **Done (`optimizer/prerank.ts`):** `selectTopK` + `PreRankingCandidateProvider` — wraps the
@@ -119,15 +145,23 @@ only the top-K. Turns "full-sim every owned item" into "full-sim the few that co
   other session's event-code contention). Pure + 11 unit tests. Slots with ≤K pass through; current
   item always retained; K configurable (≤0 disables). HEURISTIC (unlike `prune.ts`): too-small K can
   drop the optimum, hence configurable K.
-- **Pending (game-coupled, verification-heavy):** the `scoreItem` deriver — equip the candidate on
-  the current background, recompute, read surrogate inputs. Key finding: `player.equipItem(...,
-  isImporting=true)` SKIPS the stat recompute, so the deriver must call
-  `player.manager.computeAllStats()` (or `updateForEquipmentChange()`) after equipping, then read
-  `player.stats.{maxHit,minHit,accuracy,attackInterval}` and the target's hitpoints + the
-  attack-type-correct evasion off the enemy. The accuracy/evasion-by-attack-type mapping needs
-  in-game/harness verification (compare analytic top pick vs the full-sim winner) — best coordinated
-  with the sim-verification session. This is the only remaining piece of 2b.
-- Configurable K. This is the generalized form of "skip obviously-worse tiers."
+- **Done — deriver (`adapters.ts`):** `makeGameScoreItem(applier)` returns a
+  `scoreItem(slotId, itemId)`: snapshot → equip the candidate on the current background →
+  `Global.game.combat.computeAllStats()` (required because the app equip path uses
+  `isImporting=true`, which SKIPS the stat recompute) → `deriveCombatStats` reads
+  `player.stats.{maxHit,minHit,accuracy,attackInterval}` → `estimateMetric` → restore. Returns NaN
+  (sorted last) on failure. **Nominal-target design (what actually shipped):** rather than derive
+  real per-attack-type enemy evasion, every candidate is scored against a FIXED nominal target
+  `PRERANK_TARGET = { hitpoints: 1, evasion: 1e9 }`. Since pre-ranking only orders candidates
+  against EACH OTHER and they all face the same real target, the target is a common factor that
+  can't change the order; the high nominal evasion collapses the surrogate to a clean monotonic
+  `accuracy × avgDamage ÷ interval` gear-quality proxy. This sidesteps the accuracy/evasion-by-
+  attack-type mapping entirely — and it only ever FILTERS: the full sim scores the surviving top-K
+  and has the final say, with K as the safety margin if the proxy misranks (e.g. a cross-damage-type
+  swap). Wired via `buildDimensions({ preRankTopK })`.
+- Configurable K. This is the generalized form of "skip obviously-worse tiers." Default `preRankTopK
+  = 0` (**off**) in the UI — `fastSearch` (real low-trial screening, §2e) is preferred as the safer
+  default narrowing mechanism.
 
 ### 2c. Memoization cache  ✅ IMPLEMENTED (2026-06-29)
 **Landed** as `optimizer/cache.ts` `MemoizingScorer` — a `Scorer` **decorator** (zero changes to
@@ -145,29 +179,89 @@ hits**, optimizer result unchanged. App wiring type-checked; warrants in-game co
 Caveat (in cache.ts): sims are stochastic, so the cache memoizes ONE sample per key — deliberate
 (stable estimate removes noise-driven flip-flopping; the final re-score still runs fresh).
 
-### 2d. Parallel worker pool  ◑ CORE DONE (2026-07-01); game wiring pending
+### 2d. Parallel worker pool  ✅ IMPLEMENTED (core 2026-07-01; wired 2026-07-01)
 - **Done:** `parallel.ts` `parallelMap` (pure bounded-concurrency scheduler, ≤N in flight, input
   order; 8 tests) and `worker-pool.ts` `WorkerPool` (owns N `SimulatorLike` workers, batch-dispatches
-  via `parallelMap`, claim/return idle worker per task; 6 tests with fakes — concurrency ≤ size, work
-  spreads, order preserved). `worker-pool-factory.ts` `createWorkerPool(size)` news the real N Workers
-  (separate file so `worker-pool.ts` imports no browser globals → stays headless-testable).
-- **Pending (needs the running game):** wire the pool into the optimizer's per-slot candidate sweep
-  (a batch evaluate: generate all candidate save strings in-process, dispatch across the pool), and
-  measure the actual N-Worker speedup. Can't be verified headless — the harness sims in-process, no
-  browser `Worker`. The existing single-worker path is untouched (additive).
+  via `parallelMap`, claim/return idle worker per task; tests with fakes — concurrency ≤ size, work
+  spreads, order preserved; plus `simulateManySettled` per-request error capture and cancel/terminate
+  coverage). `worker-pool-factory.ts` `createWorkerPool(size)` news the real N Workers (separate file
+  so `worker-pool.ts` imports no browser globals → stays headless-testable).
+- **Done — wired (`auto-optimize.ts` + `adapters.ts`):** the UI builds/reuses a pool auto-sized to
+  `min(cores-1, 12)` (no user knob — see the module comment on why) and passes it to
+  `GameScorer(5, 5, pool)`. With a pool present the scorer exposes `evaluateBatch`; the optimizer
+  detects the method and fans a dimension's candidates across the pool (`runBatch`: import each setup
+  + generate its save string on the main thread — cheap, serial — then sim all save strings
+  concurrently). Per-request failures map to a NaN/infeasible evaluation for that candidate only
+  (via `simulateManySettled`), never failing the whole batch. Slayer-task targets also dispatch
+  their per-monster sims through the pool (B3). The single-worker path is untouched (additive): a
+  pool-less `GameScorer` advertises no `evaluateBatch` and stays serial. Actual N-worker speedup is
+  measured in-game (can't be verified headless — the harness sims in-process, no browser `Worker`).
 
-### 2e. Adaptive trials / early statistical stop  ✅ IMPLEMENTED (2026-07-01)
-**Landed** as `screenTrials`/`screenKeep` in `OptimizeOptions` + a screen→confirm pass in the
-optimizer's per-slot loop: candidates are screened at `screenTrials` (low), then only the best
-`screenKeep` are confirmed at full `searchTrials`. Opt-in (`screenTrials` 0 = off); only screens when
-a slot has > `screenKeep` candidates and `screenTrials < searchTrials`. Screen evals get their own
-sound death-abort threshold; composes with pre-ranking (screens the already-top-K set) and the cache.
-Tests: finds the true optimum under screening; screens the losers cheaply while only `screenKeep`
-reach full trials; no screen when candidates ≤ `screenKeep`.
+### 2e. Adaptive trials / early statistical stop  ✅ IMPLEMENTED (2026-07-01; ladder 2026-07-02)
+**Landed** as `screenTrials`/`screenKeep` in `OptimizeOptions` + an adaptive pass in the optimizer's
+per-slot loop. As of the remediation (A4) this is a **successive-halving ladder**, not a single
+screen: candidates race over rungs of rising fidelity — start at `screenTrials`, TRIPLE the trials
+each rung, and after every rung keep the top `max(screenKeep, ⌈k/3⌉)` survivors — then confirm the
+survivors at full `searchTrials`. It stops adding rungs once it's down to the confirm width or the
+next rung would meet/exceed `searchTrials` (so `3·screenTrials ≥ searchTrials` degenerates to the old
+single screen→confirm, and candidates ≤ `screenKeep` skip the ladder entirely). Opt-in (`screenTrials`
+0 = off); only engages when a slot has > `screenKeep` candidates and `screenTrials < searchTrials`.
+Each rung gets its own sound death-abort threshold; composes with pre-ranking (races the top-K set)
+and the cache. Tests: exact eval-count accounting on a 30-candidate dimension; the known optimum
+survives the ladder; ladder skipped when candidates ≤ screenKeep; single-rung when 3·screenTrials ≥
+searchTrials. **The UI enables this by default:** `fastSearch` (`optimizer.store`, default **true**)
+sets `screenTrials = max(10, ⌊searchTrials/4⌋)` (and `screenKeep = 3`); with `fastSearch` off,
+`screenTrials = 0` and every candidate is evaluated once at full `searchTrials`.
 
-### 2f. Candidate ordering
+### 2f. Candidate ordering  ✗ NOT IMPLEMENTED
 Order each slot's candidates by analytic score so the strongest is simmed first → stronger incumbent
-sooner → more candidates fall to pruning/early-stop.
+sooner → more candidates fall to pruning/early-stop. Not built: candidate ordering within a
+dimension is unspecified (the provider returns ids in item-registry order, minus pruned/deduped
+entries). The successive-halving ladder (2e) already delivers most of the "spend sims on the
+plausible winners" benefit this was meant to buy, so it was deprioritized. The analytic surrogate
+IS used to FILTER (top-K pre-rank, 2b) but not to order the candidates handed to the sim.
+
+---
+
+## Theme 3 — Statistical rigor (§ significance)
+
+The metric is a Monte-Carlo estimate, so a candidate can "beat" the incumbent by sampling luck. A
+dimension evaluates dozens of noisy candidates and takes the best, and max-of-N selection biases the
+winner's estimate high — so without guards the search chases noise and recommends non-improvements.
+Four composing guards (all landed in Wave 1, tracked here as the section `types.ts` cites):
+
+- **Batch-means standard error.** `GameScorer` is constructed with `batches = 5` (min
+  `minTrialsPerBatch = 5` trials/batch): each evaluation splits its trials into that many
+  independent sub-runs **inside one worker call** (the heavy save decode is paid once per
+  evaluation, not once per sub-run). `foldBatches` reports the metric as the mean of the per-batch
+  plotted values and the batch-means `stdError` (`meanStdError` in `statistics.ts`). `stdError` is
+  `undefined` for a single batch (too few trials to split), and it flows through
+  `Evaluation.stdError` → `OptimizeEvent.stdError` and onto the result as `baselineStdError` /
+  `bestStdError`.
+
+- **Significance gate (`significanceZ`, default 1.645).** In `optimizer.better()` a swap is accepted
+  only if `a.value > b.value + max(minImprovement, minRelImprovement·|incumbent|, significanceZ ·
+  hypot(seA, seB))`. The margin is the **MAX of the three terms, not the sum**. The significance
+  term is the one-sided normal band on the difference of two independent estimates (1.645 ≈ 95%
+  one-sided; 1.0 ≈ 84%; 0 disables). It only bites when the scorer supplies `stdError`; otherwise it
+  contributes 0 and the search falls back to the fixed/relative margins.
+
+- **Relative-improvement floor (`minRelImprovement`, A2).** A noise floor for scorers that can't
+  estimate `stdError`: require the gain to be at least this fraction of `|incumbent value|`. Folded
+  into the same `max(...)` margin above (so 1% is rejected at `minRelImprovement 0.02` while 3% is
+  accepted).
+
+- **Confirm-replicate winner's-curse guard (`confirmSwaps`, default true, A1).** After a dimension
+  picks its best candidate, if `confirmSwaps` is on and the scorer supports `evaluateFresh`, the
+  optimizer re-simulates the proposed winner ONCE more (a fresh, cache-overwriting replicate) and
+  commits only if the REPLICATE still clears the accept margin — and commits with the replicate's
+  unbiased score, not the lucky sample. Costs exactly one extra evaluation per accepted improving
+  swap. This removes the max-of-N selection bias that the significance band alone can't.
+
+**Slayer-task caveat:** slayer-task scoring already sims MANY monsters and averages them
+(`evaluateSlayerTask`), so it isn't batched (`batches = 1`) and supplies **no `stdError`**. The
+significance gate is therefore inert on the slayer path — it falls back to the fixed/relative
+`minImprovement` margins there.
 
 ---
 
