@@ -38,6 +38,11 @@ import {
     OptimizeTarget
 } from 'src/app/optimizer/types';
 import { choicesToLoadout, LiveLoadoutGrid, loadoutRow, RenderedLoadout } from './loadout-view';
+import { Dialog } from 'src/app/user-interface/_parts/dialog/dialog';
+import { DialogController } from 'src/app/user-interface/_parts/dialog/dialog-controller';
+import { TooltipController } from 'src/app/user-interface/_parts/tooltip/tooltip-controller';
+import { EquipmentController } from 'src/app/user-interface/pages/_parts/equipment/equipment-controller';
+import { ImageLoader } from 'src/app/utils/image-loader';
 import { Lookup } from 'src/shared/utils/lookup';
 
 // Injected at build time by webpack DefinePlugin (see webpack.config.ts) so the page can show which
@@ -68,6 +73,15 @@ interface LeaderEntry {
  */
 function lockedDimension(dim: Dimension): Dimension {
     return { ...dim, getCandidates: () => [] };
+}
+
+/**
+ * A dimension restricted to a user-picked allow-list (the "custom" scope): only the selected item
+ * ids are searched. "Leave as-is" stays reachable exactly as for any dimension — the incumbent choice
+ * is always compared against, so a custom slot can still end up unchanged.
+ */
+function customizedDimension(dim: Dimension, allowed: ReadonlySet<string>): Dimension {
+    return { ...dim, getCandidates: () => dim.getCandidates().filter(c => typeof c === 'string' && allowed.has(c)) };
 }
 
 /**
@@ -114,6 +128,13 @@ export class AutoOptimizePage extends HTMLElement {
     private readonly _locks: HTMLDivElement;
     private readonly _searchAll: HTMLButtonElement;
     private readonly _lockAll: HTMLButtonElement;
+    private readonly _scopeDialog: Dialog;
+    private readonly _scopeDialogTitle: HTMLDivElement;
+    private readonly _scopeSearch: HTMLInputElement;
+    private readonly _scopeItemsHost: HTMLDivElement;
+    private readonly _scopeClear: HTMLButtonElement;
+    private readonly _scopeSave: HTMLButtonElement;
+    private readonly _scopeCancel: HTMLButtonElement;
 
     private readonly _livePanel: HTMLDivElement;
     private readonly _liveTitle: HTMLDivElement;
@@ -139,8 +160,11 @@ export class AutoOptimizePage extends HTMLElement {
     private _pool?: WorkerPool;
     private _poolSize = 0;
 
-    /** Dimension ids the user has locked (excluded from the search). */
-    private readonly _lockedDims = new Set<string>();
+    /**
+     * Per-dimension search scope. Absent = searched normally; 'locked' = kept exactly as equipped
+     * (no candidates); a Set of item ids = "custom": only those hand-picked items are searched.
+     */
+    private readonly _dimScope = new Map<string, 'locked' | Set<string>>();
     /** Dimensions used for the current/last run, for rendering aligned choice lists. */
     private _runDims: Dimension[] = [];
 
@@ -220,6 +244,13 @@ export class AutoOptimizePage extends HTMLElement {
         this._locks = getElementFromFragment(this._content, 'mcs-auto-optimize-locks', 'div');
         this._searchAll = getElementFromFragment(this._content, 'mcs-auto-optimize-search-all', 'button');
         this._lockAll = getElementFromFragment(this._content, 'mcs-auto-optimize-lock-all', 'button');
+        this._scopeDialog = getElementFromFragment(this._content, 'mcs-auto-optimize-scope-dialog', 'mcs-dialog');
+        this._scopeDialogTitle = getElementFromFragment(this._content, 'mcs-auto-optimize-scope-dialog-title', 'div');
+        this._scopeSearch = getElementFromFragment(this._content, 'mcs-auto-optimize-scope-search', 'input');
+        this._scopeItemsHost = getElementFromFragment(this._content, 'mcs-auto-optimize-scope-items', 'div');
+        this._scopeClear = getElementFromFragment(this._content, 'mcs-auto-optimize-scope-clear', 'button');
+        this._scopeSave = getElementFromFragment(this._content, 'mcs-auto-optimize-scope-save', 'button');
+        this._scopeCancel = getElementFromFragment(this._content, 'mcs-auto-optimize-scope-cancel', 'button');
 
         this._livePanel = getElementFromFragment(this._content, 'mcs-auto-optimize-live', 'div');
         this._liveTitle = getElementFromFragment(this._content, 'mcs-auto-optimize-live-title', 'div');
@@ -278,12 +309,12 @@ export class AutoOptimizePage extends HTMLElement {
         this._apply.onclick = () => this._onApply();
 
         this._searchAll.onclick = () => {
-            this._lockedDims.clear();
+            this._dimScope.clear();
             this._renderLocks();
         };
         this._lockAll.onclick = () => {
             for (const dim of this._buildDisplayDimensions()) {
-                this._lockedDims.add(dim.id);
+                this._dimScope.set(dim.id, 'locked');
             }
             this._renderLocks();
         };
@@ -373,35 +404,198 @@ export class AutoOptimizePage extends HTMLElement {
         });
     }
 
-    /** Render the lock panel: one row per dimension with a "search this" checkbox + current icon. */
+    /**
+     * Render the search-scope panel: the equipment slots as a paper-doll grid (the same layout as the
+     * gear panels) plus a strip for the non-equipment dimensions, each cell named and showing its
+     * current choice. Clicking a cell cycles its scope: searched → locked → custom (pick the exact
+     * items to try) → searched. Custom is equipment-only; other dimensions toggle searched/locked.
+     */
     private _renderLocks() {
         const dims = this._buildDisplayDimensions();
         this._locks.innerHTML = '';
 
+        const slotDims = new Map<string, Dimension>();
+        const otherDims: Dimension[] = [];
         for (const dim of dims) {
-            const locked = this._lockedDims.has(dim.id);
-            const row = createElement('div', { classList: ['mcs-auto-optimize-lock-row'] });
-            row.classList.toggle('mcs-ao-locked', locked);
-
-            const checkbox = createElement('input', { attributes: [['type', 'checkbox']] });
-            checkbox.checked = !locked;
-            checkbox.onchange = () => {
-                if (checkbox.checked) {
-                    this._lockedDims.delete(dim.id);
-                } else {
-                    this._lockedDims.add(dim.id);
-                }
-                row.classList.toggle('mcs-ao-locked', !checkbox.checked);
-            };
-
-            // Current choice as a small icon (empty slots/consumables simply render no icon).
-            const icon = loadoutRow(choicesToLoadout([dim], [dim.getCurrentChoice()]));
-            const label = createElement('label', { text: dim.label });
-            label.onclick = () => checkbox.click();
-
-            row.append(checkbox, icon, label);
-            this._locks.appendChild(row);
+            if (Global.game.equipmentSlots.getObjectByID(dim.id)) {
+                slotDims.set(dim.id, dim);
+            } else {
+                otherDims.push(dim);
+            }
         }
+
+        const grid = createElement('div', { classList: ['mcs-ao-grid'] });
+        const size = (EquipmentSlot as any).getGridSize();
+        grid.style.gridTemplateColumns = `repeat(${size.cols.max - size.cols.min + 1}, auto)`;
+        grid.style.gridTemplateRows = `repeat(${size.rows.max - size.rows.min + 1}, auto)`;
+
+        Global.game.equipmentSlots.forEach(slot => {
+            const dim = slotDims.get(slot.id);
+            if (!dim) {
+                return; // slot not searched by the optimizer (no dimension) — no scope to set
+            }
+            const itemId = dim.getCurrentChoice() as string | null;
+            const item = itemId ? Global.game.items.equipment.getObjectByID(itemId) : undefined;
+            const img = createElement('img', { classList: ['mcs-ao-icon-img'] });
+            ImageLoader.register(img, item ? item.media : slot.emptyMedia);
+
+            const cell = this._scopeCell(dim, slot.localID, img, true);
+            cell.classList.add('mcs-ao-icon');
+            cell.classList.toggle('mcs-ao-icon-empty', !item);
+            cell.style.gridColumn = `${slot.gridPosition.col + (1 - size.cols.min)}`;
+            cell.style.gridRow = `${slot.gridPosition.row + (1 - size.rows.min)}`;
+            grid.appendChild(cell);
+        });
+
+        // Non-equipment dimensions (food/potion/prayers/spells/style/summon pairs): icon + name, so
+        // there's no ambiguity about which lever a cell controls.
+        const strip = createElement('div', { classList: ['mcs-ao-scope-strip'] });
+        for (const dim of otherDims) {
+            const content = createElement('div', { classList: ['mcs-ao-scope-item-content'] });
+            content.appendChild(loadoutRow(choicesToLoadout([dim], [dim.getCurrentChoice()])));
+            content.appendChild(createElement('div', { classList: ['mcs-ao-scope-label'], text: dim.label }));
+            const cell = this._scopeCell(dim, dim.label, content, false);
+            cell.classList.add('mcs-ao-scope-item');
+            strip.appendChild(cell);
+        }
+
+        this._locks.append(grid, strip);
+    }
+
+    /** One scope cell: content + state badge + tooltip + the click handler that cycles the scope. */
+    private _scopeCell(dim: Dimension, name: string, content: HTMLElement, allowCustom: boolean): HTMLDivElement {
+        const scope = this._dimScope.get(dim.id);
+        const mode = scope === 'locked' ? 'locked' : scope instanceof Set ? 'custom' : 'searched';
+
+        const cell = createElement('div', { classList: ['mcs-ao-scope-cell'] });
+        cell.classList.toggle('mcs-ao-scope-locked', mode === 'locked');
+        cell.classList.toggle('mcs-ao-scope-custom', mode === 'custom');
+        cell.setAttribute('data-mcsTooltip', '');
+        cell.appendChild(content);
+
+        if (mode !== 'searched') {
+            const badge = mode === 'locked' ? '🔒' : `${(scope as Set<string>).size}`;
+            cell.appendChild(createElement('div', { classList: ['mcs-ao-scope-badge'], text: badge }));
+        }
+
+        const state =
+            mode === 'locked'
+                ? 'LOCKED — kept as it currently is'
+                : mode === 'custom'
+                  ? `CUSTOM — only the ${(scope as Set<string>).size} hand-picked item(s) are searched`
+                  : 'searched';
+        const next = allowCustom
+            ? 'click to cycle searched → locked → custom'
+            : 'click to toggle searched / locked';
+        const tooltip = createElement('div', { attributes: [['data-mcsTooltipContent', '']] });
+        tooltip.innerHTML = `<strong>${name}</strong><br>${state}<br><em>${next}</em>`;
+        cell.appendChild(tooltip);
+        TooltipController.init(cell);
+
+        cell.onclick = () => {
+            if (mode === 'searched') {
+                this._dimScope.set(dim.id, 'locked');
+                this._renderLocks();
+            } else if (mode === 'locked' && allowCustom) {
+                this._openScopePicker(dim, name);
+            } else if (mode === 'custom') {
+                this._openScopePicker(dim, name); // re-edit the selection ("Search all" clears it)
+            } else {
+                this._dimScope.delete(dim.id);
+                this._renderLocks();
+            }
+        };
+        return cell;
+    }
+
+    /**
+     * The custom-scope item picker (the equipment-select-style dialog): shows the dimension's actual
+     * candidate list (already pool/attack-type/target filtered), click to multi-select. Save with a
+     * selection => custom scope; Save empty or "Search all" => back to searched; Cancel keeps the
+     * previous scope — except when cycling in from LOCKED, where Cancel completes the cycle back to
+     * searched (so plain clicking always cycles through all three states).
+     */
+    private _openScopePicker(dim: Dimension, name: string) {
+        const existing = this._dimScope.get(dim.id);
+        const selected = new Set<string>(existing instanceof Set ? existing : []);
+        const candidates = dim.getCandidates().filter((c): c is string => typeof c === 'string');
+
+        this._scopeDialogTitle.textContent = `${name} — pick the items to search`;
+        this._scopeSearch.value = '';
+        this._scopeItemsHost.innerHTML = '';
+
+        const cells = new Map<string, { element: HTMLDivElement; item: EquipmentItem }>();
+        for (const itemId of candidates) {
+            const item = Global.game.items.equipment.getObjectByID(itemId);
+            if (!item) {
+                continue;
+            }
+            const element = createElement('div', {
+                classList: ['mcs-equipment-slot-item'],
+                attributes: [['data-mcsTooltip', '']]
+            });
+            element.classList.toggle('mcs-ao-scope-selected', selected.has(itemId));
+            const img = createElement('img');
+            img.style.clipPath = 'inset(2.6px)';
+            ImageLoader.register(img, item.media);
+            element.appendChild(img);
+            const tooltip = createElement('div', { attributes: [['data-mcsTooltipContent', '']] });
+            tooltip.innerHTML = EquipmentController.getEquipmentTooltip(item);
+            element.appendChild(tooltip);
+            TooltipController.init(element);
+            element.onclick = () => {
+                if (selected.has(itemId)) {
+                    selected.delete(itemId);
+                } else {
+                    selected.add(itemId);
+                }
+                element.classList.toggle('mcs-ao-scope-selected', selected.has(itemId));
+            };
+            cells.set(itemId, { element, item });
+            this._scopeItemsHost.appendChild(element);
+        }
+
+        this._scopeSearch.oninput = () => {
+            const value = this._scopeSearch.value.toLowerCase();
+            for (const { element, item } of cells.values()) {
+                element.style.display = !value || EquipmentController.isMatch(item, value) ? '' : 'none';
+            }
+        };
+
+        let outcome: 'save' | 'clear' | undefined;
+        this._scopeSave.onclick = () => {
+            outcome = 'save';
+            DialogController.close();
+        };
+        this._scopeClear.onclick = () => {
+            outcome = 'clear';
+            DialogController.close();
+        };
+        this._scopeCancel.onclick = () => DialogController.close();
+
+        TooltipController.hide();
+        DialogController.open(this._scopeDialog, () => {
+            this._scopeItemsHost.innerHTML = '';
+            if (outcome === 'save' && selected.size > 0) {
+                this._dimScope.set(dim.id, selected);
+            } else if (outcome !== undefined || !(existing instanceof Set)) {
+                // "Search all", Save-with-nothing, or Cancel while cycling in from LOCKED.
+                this._dimScope.delete(dim.id);
+            }
+            this._renderLocks();
+        });
+    }
+
+    /** Apply the user's scope to a dimension for the run: locked, custom allow-list, or as-is. */
+    private _scopedDimension(dim: Dimension): Dimension {
+        const scope = this._dimScope.get(dim.id);
+        if (scope === 'locked') {
+            return lockedDimension(dim);
+        }
+        if (scope instanceof Set && scope.size > 0) {
+            return customizedDimension(dim, scope);
+        }
+        return dim;
     }
 
     private async _onRun() {
@@ -517,7 +711,7 @@ export class AutoOptimizePage extends HTMLElement {
                 preRankTopK,
                 ownedOnly: itemPool !== 'all'
             }
-        ).map(dim => (this._lockedDims.has(dim.id) ? lockedDimension(dim) : dim));
+        ).map(dim => this._scopedDimension(dim));
         // Progression context for the gear panels: the agility course + cartography POI in use (for
         // the target's realm). Snapshot the DESCRIBED values now — the world mutates during the
         // search. The best panel overlays the progression pass's changes when the run completes.

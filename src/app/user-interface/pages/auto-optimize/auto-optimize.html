@@ -65,7 +65,12 @@
         </div>
 
         <details id="mcs-auto-optimize-scope" class="mcs-auto-optimize-scope">
-            <summary>Search scope — lock slots to keep them fixed</summary>
+            <summary>Search scope — click a slot to cycle: searched → locked → custom</summary>
+            <div class="text-muted mcs-auto-optimize-scope-desc">
+                <strong>Searched</strong> slots are optimized; <strong>locked</strong> (🔒) slots keep whatever you
+                have equipped; <strong>custom</strong> slots search only the items you hand-pick. Custom is
+                available for equipment slots.
+            </div>
             <div class="mcs-auto-optimize-scope-actions">
                 <button id="mcs-auto-optimize-search-all" class="mcs-button-secondary" type="button">Search all</button>
                 <button id="mcs-auto-optimize-lock-all" class="mcs-button-secondary" type="button">Lock all</button>
@@ -120,5 +125,27 @@
 
         <div id="mcs-auto-optimize-results" class="mcs-auto-optimize-results"></div>
         <div id="mcs-auto-optimize-build" class="text-muted mcs-auto-optimize-build"></div>
+
+        <mcs-dialog id="mcs-auto-optimize-scope-dialog">
+            <div slot="header" id="mcs-auto-optimize-scope-dialog-title"></div>
+
+            <div slot="content">
+                <div>
+                    <input id="mcs-auto-optimize-scope-search" class="form-control" type="text" placeholder="Search" />
+                </div>
+                <div class="text-muted mcs-auto-optimize-scope-hint">
+                    Click items to select them. The search will only try the selected items for this slot (plus
+                    leaving it as it currently is).
+                </div>
+                <div id="mcs-auto-optimize-scope-items" class="mcs-auto-optimize-scope-items"></div>
+            </div>
+
+            <div slot="footer">
+                <button id="mcs-auto-optimize-scope-clear" class="mcs-button-secondary">Search all</button>
+                <div class="mcs-flex-space"></div>
+                <button id="mcs-auto-optimize-scope-save" class="mcs-button">Save</button>
+                <button id="mcs-auto-optimize-scope-cancel" class="mcs-button-secondary">Cancel</button>
+            </div>
+        </mcs-dialog>
     </div>
 </template>

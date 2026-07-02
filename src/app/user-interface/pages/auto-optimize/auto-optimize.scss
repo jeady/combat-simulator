@@ -21,6 +21,84 @@
     font-size: 0.85em;
 }
 
+// Search-scope panel: tri-state cells (searched / locked / custom) on the paper-doll grid + a strip
+// of the non-equipment dimensions, and the multi-select styling inside the custom picker dialog.
+.mcs-auto-optimize-scope-desc {
+    margin: 0.25rem 0 0.5rem;
+    font-size: 0.85em;
+}
+
+.mcs-ao-scope-cell {
+    position: relative;
+    cursor: pointer;
+}
+
+.mcs-ao-scope-locked {
+    opacity: 0.45;
+}
+
+.mcs-ao-scope-custom {
+    outline: 2px solid #e6a23c;
+    border-radius: 4px;
+}
+
+.mcs-ao-scope-badge {
+    position: absolute;
+    right: -3px;
+    bottom: -3px;
+    font-size: 0.65rem;
+    line-height: 1.2;
+    background: rgba(0, 0, 0, 0.7);
+    border-radius: 3px;
+    padding: 0 3px;
+    pointer-events: none;
+}
+
+.mcs-ao-scope-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}
+
+.mcs-ao-scope-item {
+    padding: 2px 4px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+}
+
+.mcs-ao-scope-item-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+}
+
+.mcs-ao-scope-label {
+    font-size: 0.7rem;
+    max-width: 6rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mcs-auto-optimize-scope-hint {
+    margin: 0.5rem 0;
+    font-size: 0.85em;
+}
+
+.mcs-auto-optimize-scope-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.mcs-ao-scope-selected {
+    outline: 2px solid #67c23a;
+    border-radius: 4px;
+}
+
 .mcs-auto-optimize-controls {
     display: flex;
     align-items: center;
