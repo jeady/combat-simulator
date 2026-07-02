@@ -161,6 +161,17 @@ export class AutoOptimizePage extends HTMLElement {
     private _runTarget?: OptimizeTarget;
     /** The active run's full search fidelity; leaderboard entries below this are screening noise. */
     private _runSearchTrials = 0;
+    /**
+     * Evaluations completed by FINISHED inner runs (earlier restart seeds, the gear search before the
+     * staged progression pass). Each inner optimizer.run restarts its own counter from zero, so every
+     * displayed total is offset + the current inner run's count (see _renderProgress's reset detection).
+     */
+    private _evalsOffset = 0;
+    /** The current inner run's latest raw eval counter — the reset-detection anchor. */
+    private _lastRunEvals = 0;
+    /** Restart seeds still to run after the current one + the per-seed estimate, for bar rescaling. */
+    private _seedsRemaining = 0;
+    private _perSeedEvals = 1;
     private _leaderboardSig = '';
     /** Progress-bar/ETA bookkeeping: rough total-evaluation estimate + run start time. */
     private _estimatedEvals = 1;
@@ -483,7 +494,11 @@ export class AutoOptimizePage extends HTMLElement {
         ).map(dim => (this._lockedDims.has(dim.id) ? lockedDimension(dim) : dim));
         // Estimate total work up front (candidates × passes) to drive the progress bar + ETA. With
         // restarts, the same search runs once per seed, so the denominator scales by the seed count.
-        this._estimatedEvals = this._estimateEvals() * restarts;
+        this._perSeedEvals = this._estimateEvals();
+        this._seedsRemaining = restarts - 1;
+        this._estimatedEvals = this._perSeedEvals * restarts;
+        this._evalsOffset = 0;
+        this._lastRunEvals = 0;
         this._startTime = Date.now();
         const optimizer = new CoordinateAscentOptimizer(scorer, this._runDims, applier);
         const sim = Global.stores.simulator.state;
@@ -592,8 +607,10 @@ export class AutoOptimizePage extends HTMLElement {
         const gearDims = this._runDims;
         this._status.textContent = 'Optimizing agility & cartography…';
         this._runDims = progressionDims;
-        this._estimatedEvals = this._estimateEvals();
-        this._startTime = Date.now();
+        // One run timeline: keep the start time, and add the gear search's sims to the denominator —
+        // the pass's own counter restarts at zero and is folded back in by _renderProgress's reset
+        // detection, so the label/bar keep counting whole-run totals through the staged pass.
+        this._estimatedEvals = this._evalsOffset + this._lastRunEvals + this._estimateEvals();
 
         const progressionResult = await new CoordinateAscentOptimizer(scorer, progressionDims, applier).run(
             target,
@@ -662,6 +679,9 @@ export class AutoOptimizePage extends HTMLElement {
     /** Surface which restart is running, e.g. "Restart 2/3 …", while multiStart works through seeds. */
     private _onSeedProgress(progress: MultiStartProgress) {
         this._status.textContent = `Restart ${progress.seedIndex}/${progress.seedCount} …`;
+        // Seeds still to run after this one — keeps the bar's pass-boundary rescale from dropping the
+        // not-yet-started seeds out of the denominator (seedIndex is 1-based, "about to run").
+        this._seedsRemaining = Math.max(0, progress.seedCount - progress.seedIndex);
     }
 
     private _onApply() {
@@ -780,7 +800,8 @@ export class AutoOptimizePage extends HTMLElement {
                 this._latest.changedIndex >= 0 ? this._runDims[this._latest.changedIndex]?.id : undefined;
             this._liveGrid.update(loadout, changedId);
             this._liveCaption.textContent = this._candidateCaption(this._latest);
-            this._updateProgressBar(this._latest.evaluations, false);
+            // Events carry the current inner run's counter; offset it like _renderProgress does.
+            this._updateProgressBar(this._evalsOffset + this._latest.evaluations, false);
         }
         this._renderLeaderboard();
     }
@@ -891,20 +912,34 @@ export class AutoOptimizePage extends HTMLElement {
     private _renderProgress(progress: OptimizeProgress) {
         Global.stores.optimizer.set({ progress });
 
+        // Each inner run (a restart seed, the staged progression pass) restarts its eval counter from
+        // zero. Detect the reset and fold the finished run's count into the offset, so the sims label,
+        // throughput and bar all report whole-run totals instead of the current sub-run's counter.
+        if (progress.evaluations < this._lastRunEvals) {
+            this._evalsOffset += this._lastRunEvals;
+            this._lastPass = 0; // the new inner run re-reports pass 1; re-anchor its boundary rescale
+        }
+        this._lastRunEvals = progress.evaluations;
+        const totalEvals = this._evalsOffset + progress.evaluations;
+
         // When a pass completes (the reported pass advances), rescale the denominator to what's actually
-        // been run so far plus an estimate for the passes that MIGHT still run — remaining passes often
-        // don't (the search converges), so the up-front candidates × maxPasses over-counts. We keep the
-        // bar honest by re-anchoring to evalsSoFar on each boundary.
+        // been run so far plus an estimate for the work that MIGHT still run — remaining passes often
+        // don't (the search converges), so the up-front candidates × maxPasses over-counts. Remaining
+        // restart seeds keep their up-front per-seed estimate. We keep the bar honest by re-anchoring
+        // to the sims actually done on each boundary.
         if (progress.pass > this._lastPass) {
             this._lastPass = progress.pass;
             const remainingPasses = Math.max(0, this._maxPasses - progress.pass);
-            this._estimatedEvals = Math.max(1, progress.evaluations + remainingPasses * this._perPassEvals);
+            this._estimatedEvals = Math.max(
+                1,
+                totalEvals + remainingPasses * this._perPassEvals + this._seedsRemaining * this._perSeedEvals
+            );
         }
 
         const done = progress.phase === 'done' || progress.phase === 'cancelled' || progress.phase === 'aborted';
-        const label = this._progressLabel(progress, done);
+        const label = this._progressLabel(progress, done, totalEvals);
         this._progress.textContent = label;
-        this._updateProgressBar(progress.evaluations, done);
+        this._updateProgressBar(totalEvals, done);
     }
 
     /**
@@ -912,10 +947,10 @@ export class AutoOptimizePage extends HTMLElement {
      * not reach, hence `≤`), the dimension being searched, sims run, and observed throughput. No ETA
      * derived from the unreliable total; the rough time estimate lives on the bar's ETA line.
      */
-    private _progressLabel(progress: OptimizeProgress, done: boolean): string {
+    private _progressLabel(progress: OptimizeProgress, done: boolean, totalEvals: number): string {
         if (done) {
             const best = Number.isFinite(progress.bestMetric) ? this._format(progress.bestMetric) : '—';
-            return `${this._phaseLabel(progress.phase)} · ${progress.evaluations} sims · best ${best}`;
+            return `${this._phaseLabel(progress.phase)} · ${totalEvals} sims · best ${best}`;
         }
 
         const parts = [`pass ${progress.pass}/≤${this._maxPasses}`];
@@ -928,11 +963,11 @@ export class AutoOptimizePage extends HTMLElement {
         } else {
             parts.push(this._phaseLabel(progress.phase));
         }
-        parts.push(`${progress.evaluations} sims`);
+        parts.push(`${totalEvals} sims`);
 
         const elapsed = Date.now() - this._startTime;
-        if (progress.evaluations > 0 && elapsed > 0) {
-            const perSec = (progress.evaluations / elapsed) * 1000;
+        if (totalEvals > 0 && elapsed > 0) {
+            const perSec = (totalEvals / elapsed) * 1000;
             parts.push(`${perSec.toFixed(1)} sims/s`);
         }
         return parts.join(' · ');
