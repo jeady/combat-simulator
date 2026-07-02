@@ -123,6 +123,43 @@ export function pruneDominated(items: StatVector[], relevantKeys: string[]): Sta
 }
 
 /**
+ * Offensive `equipmentStats` BASE keys that are dead weight when the weapon search is pinned to one
+ * attack style: a stat-pure item's other-style attack/strength bonuses act only through damage
+ * formulas that never run (items with cross-style special mechanics carry modifiers or special
+ * attacks and are exempt from pruning entirely). Excluding these keys from the dominance/dedupe key
+ * set stops an item surviving — or staying distinct — purely on a bonus the fight can never use.
+ * Defensive and style-agnostic keys (attackSpeed, resistances, summoning) are never excluded, and
+ * unknown/modded keys always stay relevant.
+ */
+export function irrelevantOffensiveKeys(style: 'melee' | 'ranged' | 'magic'): ReadonlySet<string> {
+    const offensive: Record<'melee' | 'ranged' | 'magic', string[]> = {
+        melee: ['stabAttackBonus', 'slashAttackBonus', 'blockAttackBonus', 'meleeStrengthBonus'],
+        ranged: ['rangedAttackBonus', 'rangedStrengthBonus'],
+        magic: ['magicAttackBonus', 'magicDamageBonus']
+    };
+    const dead = new Set<string>();
+    for (const other of ['melee', 'ranged', 'magic'] as const) {
+        if (other !== style) {
+            for (const key of offensive[other]) {
+                dead.add(key);
+            }
+        }
+    }
+    return dead;
+}
+
+/** A copy of `stats` without the given BASE keys (damage-type-suffixed variants included). */
+export function stripStatKeys(stats: Record<string, number>, baseKeys: ReadonlySet<string>): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [key, value] of Object.entries(stats)) {
+        if (!baseKeys.has(baseStatKey(key))) {
+            out[key] = value;
+        }
+    }
+    return out;
+}
+
+/**
  * A starting set of `equipmentStats` keys that influence combat for each attack style. The
  * keys mirror Melvor's `EquipmentStats` shape; this is a deliberately conservative starting
  * point meant to be refined as the analytic surrogate scorer (P2) firms up exactly which

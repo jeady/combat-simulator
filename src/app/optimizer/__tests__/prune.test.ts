@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
     directStatsForDominance,
+    irrelevantOffensiveKeys,
     pruneDominated,
     relevantStatKeysForStyle,
     statSignature,
+    stripStatKeys,
     StatVector
 } from 'src/app/optimizer/prune';
 import { dedupeBySignature } from 'src/app/optimizer/dedupe';
@@ -130,6 +132,42 @@ describe('directStatsForDominance (lower-is-better axis flip)', () => {
         const keys = [...new Set(directional.flatMap(w => Object.keys(w.stats)))];
 
         expect(ids(pruneDominated(directional, keys))).toEqual(['good']);
+    });
+});
+
+describe('irrelevantOffensiveKeys / stripStatKeys (style-dead stat pruning)', () => {
+    it('marks exactly the OTHER styles\' offensive keys as dead', () => {
+        const melee = irrelevantOffensiveKeys('melee');
+        expect(melee.has('rangedAttackBonus')).toBe(true);
+        expect(melee.has('rangedStrengthBonus')).toBe(true);
+        expect(melee.has('magicAttackBonus')).toBe(true);
+        expect(melee.has('magicDamageBonus')).toBe(true);
+        // Own-style offence and style-agnostic keys are never dead.
+        expect(melee.has('meleeStrengthBonus')).toBe(false);
+        expect(melee.has('attackSpeed')).toBe(false);
+        expect(melee.has('resistance')).toBe(false);
+    });
+
+    it('strips dead base keys including damage-type-suffixed variants, leaving the rest', () => {
+        const stripped = stripStatKeys(
+            { stabAttackBonus: 5, rangedAttackBonus: 50, 'rangedStrengthBonus:melvorItA:Abyssal': 12, attackSpeed: 2400 },
+            irrelevantOffensiveKeys('melee')
+        );
+        expect(stripped).toEqual({ stabAttackBonus: 5, attackSpeed: 2400 });
+    });
+
+    it('an item whose only edge is a dead-style bonus becomes dominated after stripping', () => {
+        const meleeHelm: StatVector = { id: 'meleeHelm', stats: { stabAttackBonus: 5 } };
+        const hybridHelm: StatVector = { id: 'hybridHelm', stats: { stabAttackBonus: 3, rangedAttackBonus: 50 } };
+
+        const dead = irrelevantOffensiveKeys('melee');
+        const stripped = [meleeHelm, hybridHelm].map(v => ({ id: v.id, stats: stripStatKeys(v.stats, dead) }));
+        const keys = [...new Set(stripped.flatMap(v => Object.keys(v.stats)))];
+
+        expect(ids(pruneDominated(stripped, keys))).toEqual(['meleeHelm']);
+        // Unstripped, the ranged bonus is a (dead) trade-off axis that wrongly keeps both alive.
+        const rawKeys = [...new Set([meleeHelm, hybridHelm].flatMap(v => Object.keys(v.stats)))];
+        expect(ids(pruneDominated([meleeHelm, hybridHelm], rawKeys))).toEqual(['hybridHelm', 'meleeHelm']);
     });
 });
 

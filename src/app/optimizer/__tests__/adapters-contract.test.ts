@@ -352,25 +352,68 @@ describe('GameCandidateProvider.getCandidates', () => {
         expect(new GameCandidateProvider('all', 'any').getCandidates(QUIVER_SLOT)).toEqual(['passiveQuiver']);
     });
 
-    it('never prunes special-effect items even when stat-dominated by another candidate', () => {
+    it('never prunes combat-modifier items even when stat-dominated by another candidate', () => {
         setGame(
             buildGame([
                 // A plainly-dominant stat-pure item.
                 { id: 'strong', validSlots: [{ id: 'melvorD:Helmet' }], owned: true, equipmentStats: [{ key: 'stabAttackBonus', value: 10 }] },
-                // A stat-weak item, but it carries a modifier — its value isn't captured by stats, so it
-                // must survive the dominance prune.
+                // A stat-weak item, but it carries a COMBAT modifier — its value isn't captured by
+                // stats, so it must survive the dominance prune.
                 {
                     id: 'special',
                     validSlots: [{ id: 'melvorD:Helmet' }],
                     owned: true,
                     equipmentStats: [{ key: 'stabAttackBonus', value: 1 }],
-                    modifiers: { someModifier: 1 }
+                    modifiers: [{ modifier: { isCombat: true, id: 'melvorD:meleeAccuracyRating' } }]
                 }
             ])
         );
         const result = new GameCandidateProvider('all', 'any').getCandidates('melvorD:Helmet');
         expect(result).toContain('special');
         expect(result).toContain('strong');
+    });
+
+    it('prunes items whose only modifiers are combat-IRRELEVANT (GP rings, skilling trinkets)', () => {
+        setGame(
+            buildGame([
+                { id: 'strong', validSlots: [{ id: 'melvorD:Helmet' }], owned: true, equipmentStats: [{ key: 'stabAttackBonus', value: 10 }] },
+                // Stat-dominated, and its only modifier is non-combat (isCombat false, not in the
+                // "actually combat" exceptions list — note e.g. currencyGain IS in that list, since
+                // the sim tracks combat GP) — no longer exempt, so the prune drops it.
+                {
+                    id: 'bankTrinket',
+                    validSlots: [{ id: 'melvorD:Helmet' }],
+                    owned: true,
+                    equipmentStats: [{ key: 'stabAttackBonus', value: 1 }],
+                    modifiers: [{ modifier: { isCombat: false, id: 'melvorD:bankSpace' } }]
+                }
+            ])
+        );
+        expect(new GameCandidateProvider('all', 'any').getCandidates('melvorD:Helmet')).toEqual(['strong']);
+    });
+
+    it('strips other-style offensive bonuses before pruning when the attack type is pinned', () => {
+        const items: FakeItem[] = [
+            { id: 'meleeHelm', validSlots: [{ id: 'melvorD:Helmet' }], owned: true, equipmentStats: [{ key: 'stabAttackBonus', value: 5 }] },
+            // Weaker for melee; only "advantage" is a ranged bonus a melee fight can never use.
+            {
+                id: 'hybridHelm',
+                validSlots: [{ id: 'melvorD:Helmet' }],
+                owned: true,
+                equipmentStats: [{ key: 'stabAttackBonus', value: 3 }, { key: 'rangedAttackBonus', value: 50 }]
+            }
+        ];
+        // Pinned to melee: the ranged bonus is dead weight, so hybridHelm is strictly dominated.
+        const built = buildGame(items);
+        built.player.attackType = 'melee';
+        setGame(built);
+        expect(new GameCandidateProvider('all', 'melee').getCandidates('melvorD:Helmet')).toEqual(['meleeHelm']);
+
+        // Unpinned ('any'): the ranged bonus is a real trade-off axis — both survive.
+        setGame(buildGame(items));
+        expect(new GameCandidateProvider('all', 'any').getCandidates('melvorD:Helmet').sort()).toEqual(
+            ['hybridHelm', 'meleeHelm'].sort()
+        );
     });
 
     it('prunes a strictly stat-dominated plain item', () => {

@@ -10,7 +10,15 @@ import { PlotKey } from 'src/app/stores/plotter.store';
 import { ItemPool } from 'src/app/stores/optimizer.store';
 import { SimulateRequest, SimulateResponse } from 'src/shared/transport/type/simulate';
 import { WorkerPool } from 'src/app/optimizer/worker-pool';
-import { directStatsForDominance, pruneDominated, statSignature, StatVector } from 'src/app/optimizer/prune';
+import {
+    directStatsForDominance,
+    irrelevantOffensiveKeys,
+    pruneDominated,
+    statSignature,
+    stripStatKeys,
+    StatVector
+} from 'src/app/optimizer/prune';
+import { ModifierHelper } from 'src/shared/utils/modifiers';
 import { YIELD_STRIDE, yieldToEventLoop } from 'src/app/optimizer/parallel';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
 import { enumerateSummonChoices, normalizeSummonChoice, SummonChoice, SummonPair, summonChoicesEqual } from 'src/app/optimizer/synergy';
@@ -661,18 +669,24 @@ export class GameCandidateProvider implements CandidateProvider {
             return true;
         });
 
-        // Prune dominated candidates to shrink the search. Items with special effects (modifiers,
-        // special attacks, set/combat effects) aren't captured by raw equipmentStats, so we NEVER
-        // prune those — only stat-pure items, and only on the full Pareto frontier across ALL their
-        // stats (dropped only if another item is >= on every stat and > on at least one), which can
-        // never drop a genuinely-better item.
+        // Prune dominated candidates to shrink the search. Items with COMBAT-relevant special effects
+        // (modifiers, special attacks, set/combat effects) aren't captured by raw equipmentStats, so
+        // we NEVER prune those — only stat-pure items, and only on the full Pareto frontier across
+        // their relevant stats (dropped only if another item is >= on every stat and > on at least
+        // one), which can never drop a genuinely-better item. When the weapon search is pinned to one
+        // attack style, the OTHER styles' offensive bonuses are dead weight on stat-pure items (their
+        // formulas never run), so they're stripped before dedupe/dominance — an item can't survive on
+        // a bonus the fight can never use. 'any' keeps every key.
+        const deadKeys =
+            attackTypeTarget !== undefined ? irrelevantOffensiveKeys(attackTypeTarget) : undefined;
         const special: string[] = [];
         const plain: StatVector[] = [];
         for (const item of items) {
             if (this.hasSpecialEffect(item)) {
                 special.push(item.id);
             } else {
-                plain.push({ id: item.id, stats: this.statVector(item) });
+                const stats = this.statVector(item);
+                plain.push({ id: item.id, stats: deadKeys ? stripStatKeys(stats, deadKeys) : stats });
             }
         }
         // First collapse combat-identical stat-pure items to a single representative: two effect-less
@@ -689,14 +703,26 @@ export class GameCandidateProvider implements CandidateProvider {
         return [...special, ...pruneDominated(directional, keys).map(v => v.id)];
     }
 
-    /** An item whose value isn't fully captured by raw equipmentStats must not be pruned. */
+    /**
+     * An item whose value isn't fully captured by raw equipmentStats must not be pruned. Player
+     * modifiers are classified through the app's combat-modifier logic (the game's `isCombat` flag
+     * plus its curated exceptions list), so an item whose modifiers are ALL combat-irrelevant — GP
+     * rings, skilling familiars, bank/pet/mastery trinkets — stays a prunable stat-pure item and
+     * folds into its stat class instead of costing simulations. Enemy modifiers, special attacks and
+     * combat effects are inherently combat and always exempt; conditional modifiers are exempt when
+     * any branch carries a combat modifier or debuffs the enemy.
+     */
     private hasSpecialEffect(item: any): boolean {
         const nonEmpty = (v: any) =>
             v != null && (Array.isArray(v) ? v.length > 0 : typeof v === 'object' ? Object.keys(v).length > 0 : !!v);
+        const anyCombat = (mods: any) =>
+            Array.isArray(mods) ? mods.some((m: ModifierValue) => ModifierHelper.isCombatModifier(m)) : nonEmpty(mods);
         return (
-            nonEmpty(item.modifiers) ||
+            anyCombat(item.modifiers) ||
             nonEmpty(item.enemyModifiers) ||
-            nonEmpty(item.conditionalModifiers) ||
+            (Array.isArray(item.conditionalModifiers)
+                ? item.conditionalModifiers.some((cond: any) => anyCombat(cond?.modifiers) || nonEmpty(cond?.enemyModifiers))
+                : nonEmpty(item.conditionalModifiers)) ||
             nonEmpty(item.specialAttacks) ||
             nonEmpty(item.combatEffects)
         );
