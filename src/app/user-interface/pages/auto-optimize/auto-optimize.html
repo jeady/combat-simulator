@@ -35,6 +35,16 @@
                 <input id="mcs-auto-optimize-fast-search" type="checkbox" checked />
                 Fast search
             </label>
+            <label class="mcs-auto-optimize-label" for="mcs-auto-optimize-restarts">Restarts</label>
+            <select
+                id="mcs-auto-optimize-restarts"
+                class="mcs-auto-optimize-select"
+                title="Re-run the search from N different starting loadouts and keep the best — escapes bad starting-gear traps at ~Nx the time."
+            >
+                <option value="1">1</option>
+                <option value="3">3</option>
+                <option value="5">5</option>
+            </select>
             <label class="mcs-auto-optimize-check" for="mcs-auto-optimize-progression"
                 title="After the gear search, run a second pass that tunes your agility course and cartography POI for the best gear.">
                 <input id="mcs-auto-optimize-progression" type="checkbox" />

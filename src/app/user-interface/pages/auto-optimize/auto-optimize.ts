@@ -4,6 +4,7 @@ import { Global } from 'src/app/global';
 import { PageController, PageId } from 'src/app/user-interface/pages/page-controller';
 import { Settings, SettingsController } from 'src/app/settings-controller';
 import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
+import { multiStart, MultiStartProgress, Seed } from 'src/app/optimizer/multistart';
 import { MemoizingScorer, stableStringify } from 'src/app/optimizer/cache';
 import { WorkerPool } from 'src/app/optimizer/worker-pool';
 import { createWorkerPool } from 'src/app/optimizer/worker-pool-factory';
@@ -67,6 +68,22 @@ function lockedDimension(dim: Dimension): Dimension {
 }
 
 /**
+ * mulberry32 — a tiny, fast, well-distributed seeded PRNG (returns a function yielding floats in
+ * [0,1)). Seeded so a run's random restart loadouts are reproducible from its start time, matching the
+ * seeded-RNG style the optimizer tests use rather than `Math.random`.
+ */
+function mulberry32(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+        a |= 0;
+        a = (a + 0x6d2b79f5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+/**
  * Minimum gap between live-view repaints (~2/sec). Candidate evaluations arrive far faster than that
  * — and in bursts under parallel workers (a whole batch lands at once) — so the "currently evaluating"
  * grid + leaderboard sample the most recent candidate at this cadence instead of repainting per event.
@@ -80,6 +97,7 @@ export class AutoOptimizePage extends HTMLElement {
     private readonly _objective: HTMLDivElement;
     private readonly _searchTrials: HTMLInputElement;
     private readonly _fastSearch: HTMLInputElement;
+    private readonly _restarts: HTMLSelectElement;
     private readonly _progression: HTMLInputElement;
     private readonly _attackType: HTMLSelectElement;
     private readonly _itemPool: HTMLSelectElement;
@@ -159,6 +177,7 @@ export class AutoOptimizePage extends HTMLElement {
         this._objective = getElementFromFragment(this._content, 'mcs-auto-optimize-objective', 'div');
         this._searchTrials = getElementFromFragment(this._content, 'mcs-auto-optimize-search-trials', 'input');
         this._fastSearch = getElementFromFragment(this._content, 'mcs-auto-optimize-fast-search', 'input');
+        this._restarts = getElementFromFragment(this._content, 'mcs-auto-optimize-restarts', 'select');
         this._progression = getElementFromFragment(this._content, 'mcs-auto-optimize-progression', 'input');
         this._attackType = getElementFromFragment(this._content, 'mcs-auto-optimize-attack-type', 'select');
         this._itemPool = getElementFromFragment(this._content, 'mcs-auto-optimize-item-pool', 'select');
@@ -215,6 +234,9 @@ export class AutoOptimizePage extends HTMLElement {
         this._searchTrials.value = String(Global.stores.optimizer.state.searchTrials);
         this._fastSearch.checked = Global.stores.optimizer.state.fastSearch;
         this._fastSearch.onchange = () => Global.stores.optimizer.set({ fastSearch: this._fastSearch.checked });
+        this._restarts.value = String(Global.stores.optimizer.state.restarts);
+        this._restarts.onchange = () =>
+            Global.stores.optimizer.set({ restarts: Math.max(1, parseInt(this._restarts.value, 10) || 1) });
         this._progression.checked = Global.stores.optimizer.state.optimizeProgression;
         this._progression.onchange = () =>
             Global.stores.optimizer.set({ optimizeProgression: this._progression.checked });
@@ -371,7 +393,8 @@ export class AutoOptimizePage extends HTMLElement {
 
         const searchTrials = Math.max(1, parseInt(this._searchTrials.value, 10) || 200);
         const fastSearch = this._fastSearch.checked;
-        Global.stores.optimizer.set({ searchTrials, fastSearch });
+        const restarts = Math.max(1, parseInt(this._restarts.value, 10) || 1);
+        Global.stores.optimizer.set({ searchTrials, fastSearch, restarts });
 
         const cancel: CancelToken = { cancelled: false };
         this._cancel = cancel;
@@ -425,8 +448,9 @@ export class AutoOptimizePage extends HTMLElement {
             preRankTopK,
             ownedOnly: itemPool !== 'all'
         }).map(dim => (this._lockedDims.has(dim.id) ? lockedDimension(dim) : dim));
-        // Estimate total work up front (candidates × passes) to drive the progress bar + ETA.
-        this._estimatedEvals = this._estimateEvals();
+        // Estimate total work up front (candidates × passes) to drive the progress bar + ETA. With
+        // restarts, the same search runs once per seed, so the denominator scales by the seed count.
+        this._estimatedEvals = this._estimateEvals() * restarts;
         this._startTime = Date.now();
         const optimizer = new CoordinateAscentOptimizer(scorer, this._runDims, applier);
         const sim = Global.stores.simulator.state;
@@ -448,13 +472,36 @@ export class AutoOptimizePage extends HTMLElement {
         };
 
         try {
-            let result = await optimizer.run(
-                target,
-                runOptions,
-                progress => this._renderProgress(progress),
-                cancel,
-                event => this._onEvent(event)
-            );
+            // Single-start (restarts === 1) is today's exact behavior: one greedy search from the
+            // user's current gear, driven straight by optimizer.run. Multiple restarts re-run the same
+            // search from randomized starting loadouts (multiStart) and keep the best — escaping cold-
+            // start local optima at ~N× the time. We deliberately keep the 1-seed case OFF the
+            // multiStart path so its behavior stays byte-identical.
+            let result: OptimizeResult;
+            if (restarts === 1) {
+                result = await optimizer.run(
+                    target,
+                    runOptions,
+                    progress => this._renderProgress(progress),
+                    cancel,
+                    event => this._onEvent(event)
+                );
+            } else {
+                const seeds = this._buildSeeds(applier, restarts);
+                const multi = await multiStart(
+                    optimizer,
+                    applier,
+                    scorer,
+                    target,
+                    seeds,
+                    runOptions,
+                    progress => this._onSeedProgress(progress),
+                    cancel,
+                    progress => this._renderProgress(progress),
+                    event => this._onEvent(event)
+                );
+                result = multi.best;
+            }
             // Staged progression pass (opt-in): once the gear/consumable search has a usable result,
             // tune agility + cartography ON TOP of the best gear. Runs only if there's something to do.
             if (
@@ -540,6 +587,46 @@ export class AutoOptimizePage extends HTMLElement {
             evaluations: gearResult.evaluations + progressionResult.evaluations,
             improved: gearResult.improved || progressionResult.improved
         };
+    }
+
+    /**
+     * Build the restart seeds for multiStart, all as opaque `applier.snapshot()` tokens.
+     *  - Seed 0 is the user's setup as-is (`current`) — so a multi-start never does worse than today's
+     *    single start (that basin is always one of the seeds).
+     *  - Each remaining seed randomizes every UNLOCKED dimension to a uniformly-random candidate, giving
+     *    the search a different starting basin. Locked dimensions (wrapped to expose no candidates) are
+     *    left untouched, as are dimensions with no candidates. Conflict resolution is the appliers' job,
+     *    exactly as during the search itself.
+     * The RNG is seeded from the run's start time so a run is reproducible. We restore the user's setup
+     * between seed constructions so each `random-i` is built from the same clean starting point, then
+     * restore it once more at the end (multiStart re-installs each seed itself before optimizing).
+     */
+    private _buildSeeds(applier: GameLoadoutApplier, restarts: number): Seed[] {
+        const original = applier.snapshot();
+        const rng = mulberry32(this._startTime >>> 0);
+        const seeds: Seed[] = [{ id: 'current', label: 'Current setup', snapshot: applier.snapshot() }];
+
+        for (let i = 1; i < restarts; i++) {
+            applier.restore(original);
+            for (const dim of this._runDims) {
+                const candidates = dim.getCandidates();
+                if (candidates.length === 0) {
+                    continue; // locked slots and empty dimensions stay as the user's setup
+                }
+                dim.applyChoice(candidates[Math.floor(rng() * candidates.length)]);
+            }
+            seeds.push({ id: `random-${i}`, label: `Random start ${i}`, snapshot: applier.snapshot() });
+        }
+
+        // multiStart snapshots the user's setup itself and restores it in its finally, but leave the
+        // world exactly as we found it here so nothing downstream sees the last random loadout.
+        applier.restore(original);
+        return seeds;
+    }
+
+    /** Surface which restart is running, e.g. "Restart 2/3 …", while multiStart works through seeds. */
+    private _onSeedProgress(progress: MultiStartProgress) {
+        this._status.textContent = `Restart ${progress.seedIndex}/${progress.seedCount} …`;
     }
 
     private _onApply() {

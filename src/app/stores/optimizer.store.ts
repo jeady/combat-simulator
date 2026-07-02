@@ -46,6 +46,13 @@ export interface OptimizerState {
      * staged-pass wiring in the auto-optimize page.
      */
     optimizeProgression: boolean;
+    /**
+     * How many times to restart the coordinate-ascent search from a different starting loadout, keeping
+     * the best result. 1 (default) is today's behavior — a single greedy search from the user's current
+     * gear, which can be trapped in a cold-start local optimum. Higher values re-run from randomized
+     * loadouts to escape those traps, at ~N× the search time.
+     */
+    restarts: number;
     progress?: OptimizeProgress;
     result?: OptimizeResult;
 }
@@ -60,7 +67,8 @@ export class OptimizerStore extends BaseStore<OptimizerState> {
             preRankTopK: 0,
             attackTypeConstraint: 'current',
             itemPool: 'owned',
-            optimizeProgression: false
+            optimizeProgression: false,
+            restarts: 1
         });
     }
 }
