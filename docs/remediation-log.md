@@ -86,6 +86,30 @@ notes below (B, D) are the original authors' entries and are unchanged.
   (flagged as unverified in review).
 - B4: optimize a melee build and confirm stab/slash/block are searched and the best style applied.
 
+## Post-checklist fixes (2026-07-02, from the first live run)
+
+The first in-game run (XP/h vs an abyssal monster, checklist items 1/4 exercised) surfaced six
+issues, fixed in `5793bee`..`13fff81` (217/217 tests green, build clean):
+
+1. `5793bee` — page unresponsive during big dimensions: the per-candidate setup loops (settings
+   import + snapshot, save-string serialization) ran synchronously with no macrotask yield; cache-hit
+   runs never yielded at all. Both paths now yield every 8 candidates.
+2. `5f3c8e7` — weapons the target is immune to (`damageType.immuneTo`, e.g. Normal vs abyssal
+   monsters) burned a full tick budget per sim just to fail; they're dropped from candidates up front.
+3. `591b72d` — the objective/target header re-rendered from the live plotter selection mid-run
+   ("Target: None selected" while running); it now pins to the run's captured target.
+4. `340f746` — screening-rung evals could outrank the confirmed best on the Top-setups leaderboard
+   (max-of-noisy-samples bias); events now carry their trial count and only full-fidelity evals rank.
+5. `17079b6` — the done label reported the LAST inner run's counter (e.g. "60 sims" from the staged
+   progression pass); counter resets are folded into an offset so totals span the whole run.
+6. `13fff81` — multi-start restarts didn't respect "keep current attack type": seed randomization
+   could leave a seed unarmed (reads as melee) and the live-resolved constraint followed it. The
+   constraint is now resolved to a concrete attack type once per run.
+
+Also landed: `333d9f7` dungeon/stronghold/abyss-depth aggregate targets (spun off after review).
+VERIFY IN-GAME: re-run checklist item 1 (page stays responsive, Cancel clickable mid-dimension),
+item 3 (restart seeds keep the attack type), and a dungeon-aggregate target end-to-end.
+
 ---
 
 ## Workstream B
