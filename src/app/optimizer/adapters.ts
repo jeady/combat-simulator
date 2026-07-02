@@ -234,16 +234,44 @@ export class GameScorer implements Scorer {
 
         const dataByMonster = new Map<string, SimulationData>();
         let anySuccess = false;
-        for (const monster of monsters) {
-            // entityId undefined => the worker fights the plain monster, exactly as the Simulate queue
-            // does. Slayer-task scoring already sims many monsters, so it isn't batched (batches=1):
-            // the significance gate simply falls back to the fixed minImprovement margin here.
-            const datas = await this.runSim(monster.id, undefined, trials, ticks, deathAbortThreshold);
-            const data = datas?.[0];
-            if (data) {
-                anySuccess = true;
+        // entityId undefined => the worker fights the plain monster, exactly as the Simulate queue does.
+        // Slayer-task scoring already sims many monsters, so it isn't batched (batches=1): the
+        // significance gate simply falls back to the fixed minImprovement margin here.
+        if (this.pool) {
+            // The setup is identical for every task monster, so the (heavy) save decode is done once and
+            // each monster becomes one request the pool sims concurrently — an ~N-monster speedup with the
+            // pool that was otherwise idle on this path. Per-request failures are captured, not fatal.
+            const saveString = Global.game.generateSaveStringSimple();
+            const requests: SimulateRequest[] = monsters.map(monster => ({
+                saveString,
+                monsterId: monster.id,
+                entityId: undefined as unknown as string,
+                trials,
+                maxTicks: ticks,
+                deathAbortThreshold,
+                batches: undefined
+            }));
+            const settled = await this.pool.simulateManySettled(requests);
+            settled.forEach((result, i) => {
+                const monster = monsters[i];
+                const datas = result.ok
+                    ? this.responseToDatas(result.value, monster.id, undefined, trials, ticks)
+                    : undefined;
+                const data = datas?.[0];
+                if (data) {
+                    anySuccess = true;
+                }
+                dataByMonster.set(monster.id, data ?? Global.simulation.newSimDataEntry(true));
+            });
+        } else {
+            for (const monster of monsters) {
+                const datas = await this.runSim(monster.id, undefined, trials, ticks, deathAbortThreshold);
+                const data = datas?.[0];
+                if (data) {
+                    anySuccess = true;
+                }
+                dataByMonster.set(monster.id, data ?? Global.simulation.newSimDataEntry(true));
             }
-            dataByMonster.set(monster.id, data ?? Global.simulation.newSimDataEntry(true));
         }
 
         if (!anySuccess) {
@@ -391,16 +419,24 @@ export class GameScorer implements Scorer {
             };
         });
 
-        let responses: SimulateResponse[];
-        try {
-            responses = await this.pool.simulateMany(requests);
-        } catch (error) {
-            Global.logger.warn('Optimizer parallel sim threw', { error });
-            return setups.map(() => ({ metric: NaN, deathRate: Infinity, success: false }));
+        // Per-request error capture: one failed worker request must fail only ITS candidate, not the
+        // whole dimension's batch (a rejecting simulateMany would return all-NaN for every candidate).
+        const settled = await this.pool.simulateManySettled(requests);
+
+        const failures = settled.filter((r): r is { ok: false; error: unknown } => !r.ok);
+        if (failures.length > 0) {
+            Global.logger.warn('Optimizer parallel sim: some requests failed', {
+                failed: failures.length,
+                total: settled.length,
+                firstError: failures[0].error
+            });
         }
 
-        return responses.map(response => {
-            const datas = this.responseToDatas(response, target.monsterId, target.entityId, trials, ticks);
+        return settled.map(result => {
+            if (!result.ok) {
+                return { metric: NaN, deathRate: Infinity, success: false };
+            }
+            const datas = this.responseToDatas(result.value, target.monsterId, target.entityId, trials, ticks);
             return datas ? this.foldBatches(datas) : { metric: NaN, deathRate: Infinity, success: false };
         });
     }

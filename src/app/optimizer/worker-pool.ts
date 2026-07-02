@@ -19,6 +19,11 @@
 import { SimulateRequest, SimulateResponse } from 'src/shared/transport/type/simulate';
 import { parallelMap } from 'src/app/optimizer/parallel';
 
+/** Per-request outcome from {@link WorkerPool.simulateManySettled}: a value, or the error that request threw. */
+export type SettledResponse =
+    | { ok: true; value: SimulateResponse }
+    | { ok: false; error: unknown };
+
 /** The slice of {@link Simulator} the pool needs — kept minimal so fakes can stand in under test. */
 export interface SimulatorLike {
     init(): Promise<unknown>;
@@ -68,6 +73,30 @@ export class WorkerPool {
             }
             try {
                 return await sim.simulate(request);
+            } finally {
+                this.available.push(sim);
+            }
+        });
+    }
+
+    /**
+     * Like {@link simulateMany}, but each request's outcome is captured independently: one request's
+     * failure does NOT reject the whole batch (as `parallelMap` / `Promise.all` would). Results are in
+     * request order; every task returns its simulator to the pool in a `finally`, so a failed request
+     * never leaks a worker or underflows the pool. Callers map `ok:false` entries to their own failure
+     * value (e.g. a NaN evaluation) so a single bad worker request doesn't nuke a whole dimension's batch.
+     */
+    public simulateManySettled(requests: readonly SimulateRequest[]): Promise<SettledResponse[]> {
+        return parallelMap(requests, this.simulators.length, async request => {
+            const sim = this.available.pop();
+            if (!sim) {
+                // Unreachable: parallelMap bounds concurrency to the pool size. Guard anyway.
+                throw new Error('WorkerPool: no idle simulator (concurrency invariant violated)');
+            }
+            try {
+                return { ok: true, value: await sim.simulate(request) } as SettledResponse;
+            } catch (error) {
+                return { ok: false, error } as SettledResponse;
             } finally {
                 this.available.push(sim);
             }
