@@ -21,6 +21,7 @@ import {
     Scorer,
     SetupApplier
 } from 'src/app/optimizer/types';
+import { YIELD_STRIDE, yieldToEventLoop } from 'src/app/optimizer/parallel';
 
 /** Internal comparable score. Higher is better, with feasibility taking precedence. */
 interface Score {
@@ -169,7 +170,15 @@ export class CoordinateAscentOptimizer {
                     const evalChoices = async (choices: DimensionChoice[], trials: number, abort: number) => {
                         const batch = this.scorer.evaluateBatch?.bind(this.scorer);
                         if (batch && choices.length > 1) {
-                            const setups = choices.map(applyOnIncumbent);
+                            // Setup production is synchronous main-thread work per candidate; yield
+                            // periodically so a large dimension doesn't freeze the page (see YIELD_STRIDE).
+                            const setups: unknown[] = [];
+                            for (const choice of choices) {
+                                setups.push(applyOnIncumbent(choice));
+                                if (setups.length % YIELD_STRIDE === 0) {
+                                    await yieldToEventLoop();
+                                }
+                            }
                             const evals = await batch(setups, target, trials, opts.searchTicks, abort);
                             return choices.map((choice, idx) => recordEval(choice, evals[idx]));
                         }
@@ -180,6 +189,11 @@ export class CoordinateAscentOptimizer {
                             out.push(recordEval(choice, evaluation));
                             if (cancel?.cancelled) {
                                 break;
+                            }
+                            // A memoizing scorer can serve this whole loop from cache (microtask-only
+                            // awaits), so it needs the same periodic macrotask yield as the batch path.
+                            if (out.length % YIELD_STRIDE === 0) {
+                                await yieldToEventLoop();
                             }
                         }
                         return out;

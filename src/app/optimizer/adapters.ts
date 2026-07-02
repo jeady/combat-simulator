@@ -11,6 +11,7 @@ import { ItemPool } from 'src/app/stores/optimizer.store';
 import { SimulateRequest, SimulateResponse } from 'src/shared/transport/type/simulate';
 import { WorkerPool } from 'src/app/optimizer/worker-pool';
 import { directStatsForDominance, pruneDominated, statSignature, StatVector } from 'src/app/optimizer/prune';
+import { YIELD_STRIDE, yieldToEventLoop } from 'src/app/optimizer/parallel';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
 import { enumerateSummonChoices, normalizeSummonChoice, SummonChoice, SummonPair, summonChoicesEqual } from 'src/app/optimizer/synergy';
 import { PreRankingCandidateProvider } from 'src/app/optimizer/prerank';
@@ -490,10 +491,12 @@ export class GameScorer implements Scorer {
 
         const batches = this.resolveBatches(trials);
         // Import each setup and capture its save string (mutates the shared sim world, so this must be
-        // sequential — but it's cheap). The heavy work is the sims, which the pool runs in parallel.
-        const requests: SimulateRequest[] = setups.map(setup => {
+        // sequential). Each iteration is a full settings import + save serialization on the main
+        // thread, so yield periodically — a big dimension would otherwise freeze the page.
+        const requests: SimulateRequest[] = [];
+        for (const setup of setups) {
             SettingsController.import(setup as Settings);
-            return {
+            requests.push({
                 saveString: Global.game.generateSaveStringSimple(),
                 monsterId: target.monsterId,
                 entityId: target.entityId as string,
@@ -501,8 +504,11 @@ export class GameScorer implements Scorer {
                 maxTicks: ticks,
                 deathAbortThreshold,
                 batches: batches > 1 ? batches : undefined
-            };
-        });
+            });
+            if (requests.length % YIELD_STRIDE === 0) {
+                await yieldToEventLoop();
+            }
+        }
 
         // Per-request error capture: one failed worker request must fail only ITS candidate, not the
         // whole dimension's batch (a rejecting simulateMany would return all-NaN for every candidate).
