@@ -73,21 +73,28 @@ export interface SummonPair {
  *
  * The candidate set is, de-duplicated and order-insensitively:
  *   1. the empty option (no familiars) — always a valid choice and the baseline for "drop both",
- *   2. every single available familiar (one slot filled) — so the search can still pick a lone
- *      familiar when that beats any pair, exactly as the per-slot search would have,
+ *   2. every single available familiar (one slot filled) — ONLY when `includeSingles` (default),
  *   3. every declared pair where BOTH ids are available — the whole reason this dimension exists.
  *
  * A pair is included ONLY when both members are available: a pair with an unowned / unequippable
  * member is not a legal loadout, so offering it would just waste an evaluation (and the apply
- * would silently fail to equip the missing tablet). Singles are derived from `availableIds`, not
- * from the pairs, so non-synergy familiars remain searchable too.
+ * would silently fail to equip the missing tablet).
+ *
+ * `includeSingles` exists because this dimension is meant to run ALONGSIDE the two independent
+ * summon-slot dimensions. Those already cover the empty / single / additive-pair cases optimally
+ * (a solo familiar's value has no cross-term), so the compound dimension only needs to add what
+ * they can't reach: the declared SYNERGY pairs. Passing `false` drops the redundant singles and
+ * leaves just `{ empty } ∪ { declared pairs }`, so no evaluations are wasted re-deriving loadouts
+ * the per-slot search already finds. (The empty option is always kept as the pair baseline.)
  *
  * @param pairs declared synergy pairs (ABSTRACT — the caller maps game synergies to ids).
  * @param availableIds summon tablet ids the character may equip (owned + requirement-met).
+ * @param includeSingles include every single familiar as a candidate (default true).
  */
 export function enumerateSummonChoices(
     pairs: readonly SummonPair[],
-    availableIds: Iterable<string>
+    availableIds: Iterable<string>,
+    includeSingles = true
 ): SummonChoice[] {
     const available = new Set(availableIds);
     const byKey = new Map<string, SummonChoice>();
@@ -100,9 +107,11 @@ export function enumerateSummonChoices(
     // 1. The empty option.
     add({});
 
-    // 2. Every available single familiar.
-    for (const id of available) {
-        add({ first: id });
+    // 2. Every available single familiar (unless the caller only wants pairs).
+    if (includeSingles) {
+        for (const id of available) {
+            add({ first: id });
+        }
     }
 
     // 3. Every declared pair whose members are both available.

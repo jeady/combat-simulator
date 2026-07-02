@@ -62,6 +62,22 @@ describe('enumerateSummonChoices (pure)', () => {
         const choices = enumerateSummonChoices(pairs, ['a', 'b', 'c']);
         expect(keys(choices)).toEqual(['|', 'a|', 'b|', 'c|', 'a|b'].sort());
     });
+
+    it('omits singles when includeSingles is false (pairs-only, alongside the per-slot dims)', () => {
+        const pairs = [{ a: 'a', b: 'b' }];
+        // 'c' is available but has no declared pair, so it appears nowhere (the per-slot dims cover it).
+        const choices = enumerateSummonChoices(pairs, ['a', 'b', 'c'], false);
+        expect(keys(choices)).toEqual(['|', 'a|b'].sort());
+    });
+
+    it('pairs-only still keeps only pairs whose members are both available', () => {
+        const pairs = [
+            { a: 'a', b: 'b' },
+            { a: 'a', b: 'missing' }
+        ];
+        const choices = enumerateSummonChoices(pairs, ['a', 'b'], false);
+        expect(keys(choices)).toEqual(['|', 'a|b'].sort());
+    });
 });
 
 describe('normalizeSummonChoice / summonChoicesEqual', () => {

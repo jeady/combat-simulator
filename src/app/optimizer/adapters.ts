@@ -12,7 +12,7 @@ import { SimulateRequest, SimulateResponse } from 'src/shared/transport/type/sim
 import { WorkerPool } from 'src/app/optimizer/worker-pool';
 import { pruneDominated, statSignature, StatVector } from 'src/app/optimizer/prune';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
-import { enumerateSummonChoices, normalizeSummonChoice, SummonChoice, summonChoicesEqual } from 'src/app/optimizer/synergy';
+import { enumerateSummonChoices, normalizeSummonChoice, SummonChoice, SummonPair, summonChoicesEqual } from 'src/app/optimizer/synergy';
 import { PreRankingCandidateProvider } from 'src/app/optimizer/prerank';
 import { dedupeBySignature } from 'src/app/optimizer/dedupe';
 import {
@@ -885,10 +885,15 @@ function combatPotionIds(ownedOnly: boolean): string[] {
  * declared {@link SummoningSynergy} pairs that are only good TOGETHER. See `synergy.ts` for the WHY:
  * generic coordinate ascent changes one slot at a time and would never adopt either half of a pair.
  *
+ * This runs ALONGSIDE the two independent summon-slot dimensions (they optimally handle solos and
+ * additive non-synergy pairs), so it only offers what they can't reach: the empty baseline and the
+ * declared synergy pairs (`includeSingles: false`). That keeps the extra cost to roughly the number
+ * of declared pairs rather than re-searching combinations the per-slot moves already cover.
+ *
  * - getCandidates: read `Global.game.summoning.synergies`, map each synergy's two `summons` to their
  *   `product` (the equippable tablet) ids => declared pairs; gather the available summon ids; hand
- *   both to the pure enumerator. The enumerator yields the empty option, every single, and every
- *   pair whose members are both available.
+ *   both to the pure enumerator, which yields the empty option plus every pair whose members are
+ *   both available.
  * - applyChoice: clear both summon slots, then equip the chosen tablet(s). Wrapped in try/catch +
  *   logger for graceful degradation (a failed apply just scores as the incumbent the optimizer
  *   restored, rather than breaking the run), mirroring {@link settingsDimension}.
@@ -907,11 +912,20 @@ export function summonSynergyDimension(applier: GameLoadoutApplier, ownedOnly: b
         id: 'summon-pair',
         label: 'Summoning',
         getCandidates: (): SummonChoice[] => {
-            const pairs = Global.game.summoning.synergies.map(synergy => ({
-                a: synergy.summons[0].product.id,
-                b: synergy.summons[1].product.id
-            }));
-            return enumerateSummonChoices(pairs, availableSummonIds(ownedOnly));
+            // Defensive: this dimension is on by default and the synergy->product mapping isn't yet
+            // verified against every content pack. If the data shape ever surprises us, fall back to
+            // the empty option only (the per-slot summon dims still run) rather than breaking the run.
+            let pairs: SummonPair[] = [];
+            try {
+                pairs = Global.game.summoning.synergies
+                    .map(synergy => ({ a: synergy.summons[0]?.product?.id, b: synergy.summons[1]?.product?.id }))
+                    .filter((pair): pair is SummonPair => !!pair.a && !!pair.b);
+            } catch (error) {
+                Global.logger.error(`Optimizer dimension 'summon-pair' failed to read synergies`, error);
+            }
+            // Pairs only: the two per-slot summon dimensions running alongside this one already cover
+            // the empty / single / additive-pair cases, so singles here would just be wasted evals.
+            return enumerateSummonChoices(pairs, availableSummonIds(ownedOnly), false);
         },
         getCurrentChoice: readChoice,
         applyChoice: (choice: unknown) => {
@@ -1185,11 +1199,12 @@ function auroraSpellDimension(): Dimension {
  * The same `applier` is passed to the optimizer as its SetupApplier. Non-equipment dimensions reuse
  * the verified `SettingsController.import` path.
  *
- * `summonSynergy` (default FALSE — regression-safe) swaps the two per-slot summon dimensions for the
- * single compound {@link summonSynergyDimension}, excluding the summon slots from
- * `equipmentDimensions` so the optimizer doesn't search each summon slot independently AND as a pair.
- * `preRankTopK` applies the analytic two-tier pre-rank (§2b); `allowEmpty` lets the search leave a
- * slot empty when that beats every item.
+ * `summonSynergy` (default TRUE) ADDS the compound {@link summonSynergyDimension} on top of the two
+ * per-slot summon dimensions (which are always searched). The per-slot moves optimally handle solo
+ * familiars and additive non-synergy pairs; the compound dimension adds only the declared SYNERGY
+ * pairs those greedy moves can't reach — so the two together cover the whole summon subspace at a
+ * cost of roughly one extra evaluation per declared pair. `preRankTopK` applies the analytic two-tier
+ * pre-rank (§2b); `allowEmpty` lets the search leave a slot empty when that beats every item.
  */
 export function buildDimensions(
     applier: GameLoadoutApplier,
@@ -1209,7 +1224,7 @@ export function buildDimensions(
     } = {}
 ): Dimension[] {
     const ownedOnly = options.ownedOnly ?? true;
-    const summonSynergy = options.summonSynergy ?? false;
+    const summonSynergy = options.summonSynergy ?? true;
     // Two-tier pre-rank: wrap the candidate provider so each slot only surfaces its top-K candidates
     // by the cheap analytic surrogate, and the expensive sim is spent on the finalists. A HEURISTIC
     // filter (unlike the sound dominance prune inside GameCandidateProvider), so it's off unless a K
@@ -1224,16 +1239,12 @@ export function buildDimensions(
               )
             : candidates;
     // allowEmpty (default TRUE for the real game) lets the search leave a slot empty when that beats
-    // every item — the sim decides. Coordinate ascent could otherwise only swap, never unequip.
-    const dims = equipmentDimensions(
-        applier,
-        provider,
-        slotLabel,
-        summonSynergy ? SUMMON_SLOT_IDS : undefined,
-        options.allowEmpty ?? true
-    );
+    // every item — the sim decides. Coordinate ascent could otherwise only swap, never unequip. The
+    // summon slots are ALWAYS searched independently (no exclusion); the compound synergy dimension
+    // below is additive, not a replacement, so solo/additive-pair coverage is never lost.
+    const dims = equipmentDimensions(applier, provider, slotLabel, undefined, options.allowEmpty ?? true);
     if (summonSynergy) {
-        dims.push(summonSynergyDimension(applier, options.ownedOnly ?? true));
+        dims.push(summonSynergyDimension(applier, ownedOnly));
     }
     if (options.food ?? true) {
         dims.push(foodDimension(ownedOnly));
