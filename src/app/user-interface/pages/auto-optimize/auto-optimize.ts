@@ -90,6 +90,7 @@ export class AutoOptimizePage extends HTMLElement {
     private readonly _lockAll: HTMLButtonElement;
 
     private readonly _livePanel: HTMLDivElement;
+    private readonly _liveTitle: HTMLDivElement;
     private readonly _liveCaption: HTMLDivElement;
     private readonly _liveGridHost: HTMLDivElement;
     private readonly _feedPanel: HTMLDivElement;
@@ -124,6 +125,8 @@ export class AutoOptimizePage extends HTMLElement {
     private _baselineLoadout?: RenderedLoadout;
     private readonly _leaderboardMap = new Map<string, LeaderEntry>();
     private _latest?: OptimizeEvent;
+    /** The most recent best-improved event, used to render the winning loadout when the run finishes. */
+    private _bestEvent?: OptimizeEvent;
     /** Wall-clock of the last live-view repaint + a pending trailing-repaint timer (see _scheduleRender). */
     private _lastRenderAt = 0;
     private _renderTimer?: number;
@@ -155,6 +158,7 @@ export class AutoOptimizePage extends HTMLElement {
         this._lockAll = getElementFromFragment(this._content, 'mcs-auto-optimize-lock-all', 'button');
 
         this._livePanel = getElementFromFragment(this._content, 'mcs-auto-optimize-live', 'div');
+        this._liveTitle = getElementFromFragment(this._content, 'mcs-auto-optimize-live-title', 'div');
         this._liveCaption = getElementFromFragment(this._content, 'mcs-auto-optimize-live-caption', 'div');
         this._liveGridHost = getElementFromFragment(this._content, 'mcs-auto-optimize-live-grid', 'div');
         this._feedPanel = getElementFromFragment(this._content, 'mcs-auto-optimize-feed-panel', 'div');
@@ -458,9 +462,11 @@ export class AutoOptimizePage extends HTMLElement {
         this._leaderboardMap.clear();
         this._leaderboardSig = '';
         this._latest = undefined;
+        this._bestEvent = undefined;
         this._baselineLoadout = undefined;
         this._feed.innerHTML = '';
         this._leaderboard.innerHTML = '';
+        this._liveTitle.textContent = 'Currently evaluating';
         this._liveCaption.textContent = '';
         this._liveGridHost.innerHTML = '';
         this._liveGrid = new LiveLoadoutGrid();
@@ -503,6 +509,7 @@ export class AutoOptimizePage extends HTMLElement {
 
         this._latest = event;
         if (event.type === 'best-improved') {
+            this._bestEvent = event;
             this._appendFeed(event);
         }
         this._scheduleRender();
@@ -782,6 +789,31 @@ export class AutoOptimizePage extends HTMLElement {
         html += `<div class="text-muted">${result.evaluations} simulations run.</div>`;
         this._results.innerHTML = html;
         this._apply.disabled = !result.improved;
+        this._showBestSetup(result);
+    }
+
+    /**
+     * Once the run is over, repurpose the live "currently evaluating" panel to show the winning setup:
+     * the best loadout found (or the unchanged current setup if nothing beat it) plus its final metric.
+     */
+    private _showBestSetup(result: OptimizeResult) {
+        // Cancel any pending throttled repaint so it can't clobber this with the last candidate tried.
+        if (this._renderTimer !== undefined) {
+            clearTimeout(this._renderTimer);
+            this._renderTimer = undefined;
+        }
+        this._liveTitle.textContent = result.improved ? 'Best setup found' : 'Best setup (unchanged)';
+        const loadout =
+            result.improved && this._bestEvent
+                ? choicesToLoadout(this._runDims, this._bestEvent.choices)
+                : this._baselineLoadout;
+        if (loadout && this._liveGrid) {
+            this._liveGrid.update(loadout);
+        }
+        const metric = Number.isFinite(result.bestMetric)
+            ? `${this._format(result.bestMetric)}${this._metricUnit()}`
+            : '—';
+        this._liveCaption.textContent = `${metric} · ${(result.bestDeathRate * 100).toFixed(1)}% death`;
     }
 
     private _itemName(itemId?: string): string {

@@ -86,7 +86,7 @@
                     <div id="mcs-auto-optimize-base-grid"></div>
                 </div>
                 <div class="mcs-auto-optimize-live-col">
-                    <div class="mcs-auto-optimize-section-title">Currently evaluating</div>
+                    <div id="mcs-auto-optimize-live-title" class="mcs-auto-optimize-section-title">Currently evaluating</div>
                     <div id="mcs-auto-optimize-live-caption" class="mcs-auto-optimize-live-caption"></div>
                     <div id="mcs-auto-optimize-live-grid"></div>
                 </div>
@@ -96,11 +96,19 @@
         <div class="mcs-auto-optimize-columns">
             <div id="mcs-auto-optimize-feed-panel" class="mcs-auto-optimize-feed-panel" style="display: none">
                 <div class="mcs-auto-optimize-section-title">New bests</div>
+                <div class="mcs-auto-optimize-section-desc text-muted">
+                    Each time the search finds a setup that beats the current best, it's added here (newest at the
+                    bottom). Highlighted slots differ from your current setup.
+                </div>
                 <div id="mcs-auto-optimize-feed" class="mcs-auto-optimize-feed"></div>
             </div>
 
             <div id="mcs-auto-optimize-leaderboard-panel" class="mcs-auto-optimize-leaderboard-panel" style="display: none">
                 <div class="mcs-auto-optimize-section-title">Top setups</div>
+                <div class="mcs-auto-optimize-section-desc text-muted">
+                    The highest-scoring setups tried so far, ranked (survivable first). Includes strong alternatives the
+                    search didn't ultimately pick.
+                </div>
                 <div id="mcs-auto-optimize-leaderboard" class="mcs-auto-optimize-leaderboard"></div>
             </div>
         </div>
