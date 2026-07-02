@@ -30,6 +30,7 @@ import {
     Dimension,
     DimensionChange,
     DimensionChoice,
+    Evaluation,
     OptimizeEvent,
     OptimizeOptions,
     OptimizePhase,
@@ -173,6 +174,8 @@ export class AutoOptimizePage extends HTMLElement {
     private _baseGrid?: LiveLoadoutGrid;
     /** Baseline loadout, for the "Current setup" panel and diff-highlighting in the feed/leaderboard. */
     private _baselineLoadout?: RenderedLoadout;
+    /** The baseline's RAW per-dimension choices (aligned to _runDims), for risk attribution reverts. */
+    private _baselineChoices?: DimensionChoice[];
     private readonly _leaderboardMap = new Map<string, LeaderEntry>();
     private _latest?: OptimizeEvent;
     /** The most recent best-improved event, used to render the winning loadout when the run finishes. */
@@ -749,7 +752,11 @@ export class AutoOptimizePage extends HTMLElement {
             // Fast search screening (see the field capture at run start). The optimizer skips the
             // screen pass automatically for slots that have ≤ screenKeep candidates (no benefit there).
             screenTrials: this._runScreenTrials,
-            screenKeep: this._runScreenKeep
+            screenKeep: this._runScreenKeep,
+            // Slayer-task/dungeon aggregates run unbatched, so they can't estimate stdError and the
+            // z·SE significance gate is inert — swaps would commit on any noise-level delta. Require a
+            // 1% relative gain there instead (single-monster targets keep the statistical gate).
+            minRelImprovement: slayerTaskTargetId(target) || dungeonTargetId(target) ? 0.01 : 0
         };
 
         try {
@@ -795,6 +802,12 @@ export class AutoOptimizePage extends HTMLElement {
             this._result = result;
             Global.stores.optimizer.set({ result });
             this._renderResult(result);
+            // When the winner still shows deaths at full fidelity, attribute the risk: re-sim the
+            // best setup with each gear change individually reverted, so the user can see WHICH slot
+            // carries the danger instead of guessing across the whole diff.
+            if (result.improved && result.bestDeathRate > 0 && !cancel.cancelled) {
+                await this._analyzeRisk(result, applier, scorer, target, runOptions, cancel);
+            }
         } catch (error) {
             this._status.textContent = `Optimization failed: ${(error as Error)?.message ?? String(error)}`;
             Global.logger.error('Auto-optimize failed', error);
@@ -922,11 +935,12 @@ export class AutoOptimizePage extends HTMLElement {
             return;
         }
 
-        // bestSetup is the full winning configuration (a Settings snapshot); apply it directly.
+        // bestSetup is the full winning configuration (a Settings snapshot); apply it directly. The
+        // button stays enabled so the user can fiddle with the loadout and re-apply to get back to
+        // the optimizer's recommendation at any time (until the next run replaces the result).
         SettingsController.import(this._result.bestSetup as Settings);
 
-        this._status.textContent = 'Applied the best setup to your configuration.';
-        this._apply.disabled = true;
+        this._status.textContent = 'Applied the best setup to your configuration — click again anytime to re-apply.';
         this._renderLocks();
     }
 
@@ -944,6 +958,7 @@ export class AutoOptimizePage extends HTMLElement {
         this._latest = undefined;
         this._bestEvent = undefined;
         this._baselineLoadout = undefined;
+        this._baselineChoices = undefined;
         this._feed.innerHTML = '';
         this._leaderboard.innerHTML = '';
         this._liveTitle.textContent = 'Currently evaluating';
@@ -976,6 +991,7 @@ export class AutoOptimizePage extends HTMLElement {
     private _onEvent(event: OptimizeEvent) {
         // The first event (changedIndex -1) is the baseline: the user's current setup + its score.
         if (event.changedIndex === -1 && !this._baselineLoadout) {
+            this._baselineChoices = event.choices;
             this._baselineLoadout = choicesToLoadout(this._runDims, event.choices);
             this._baseGrid?.update(this._baselineLoadout);
             this._baseCaption.textContent = this._scoreCaption('Current', event);
@@ -1365,6 +1381,24 @@ export class AutoOptimizePage extends HTMLElement {
                 ` &rarr; ${this._format(result.bestHighestDamageTaken)}</div>`;
         }
 
+        // Deterministic spike-safety check: a single hit at or above the auto-eat threshold can kill
+        // from just-eaten HP no matter how lucky the sampled trials were — the sampled death rate
+        // UNDERSTATES the risk whenever this triggers. Read the threshold with the winner applied
+        // (auto-eat scales with the setup's max HP), then restore.
+        if (result.improved && result.bestHighestDamageTaken !== undefined) {
+            const saved = SettingsController.export();
+            SettingsController.import(result.bestSetup as Settings);
+            const autoEat = Math.floor(Global.game.combat.player.autoEatThreshold);
+            SettingsController.import(saved);
+            if (autoEat > 0 && result.bestHighestDamageTaken >= autoEat) {
+                html +=
+                    `<div class="mcs-auto-optimize-warn">⚠ Spike risk: the worst hit taken ` +
+                    `(${this._format(result.bestHighestDamageTaken)}) meets or exceeds this setup's auto-eat ` +
+                    `threshold (${this._format(autoEat)}). Back-to-back spikes can kill even when the sampled ` +
+                    `death rate looks low — treat the death rate above as a lower bound.</div>`;
+            }
+        }
+
         // A recommendation that survived the low-fidelity search but DIED at full trials is dangerous —
         // it looks safe but isn't. Warn unmissably above Apply (which stays enabled — the user decides).
         if (result.improved && result.bestFeasible === false) {
@@ -1443,6 +1477,84 @@ export class AutoOptimizePage extends HTMLElement {
             lines.push(`<strong>${entry.label}:</strong> ${value(entry)}`);
         }
         return lines;
+    }
+
+    /**
+     * Attribute the winner's residual death risk to individual changes: re-sim the best setup with
+     * each changed dimension reverted to the user's original choice — full trials, cache-bypassing,
+     * and NO death-abort (measure, don't race). The change whose reversal removes the most death
+     * rate is the one poisoning the loadout; the metric column shows what reverting would cost.
+     * Progression-pass changes (agility/cartography) aren't dimensions of this run and are skipped.
+     */
+    private async _analyzeRisk(
+        result: OptimizeResult,
+        applier: GameLoadoutApplier,
+        scorer: MemoizingScorer,
+        target: OptimizeTarget,
+        runOptions: Partial<OptimizeOptions>,
+        cancel: CancelToken
+    ) {
+        const bestChoices = this._bestEvent?.choices;
+        const baseChoices = this._baselineChoices;
+        if (!bestChoices || !baseChoices) {
+            return;
+        }
+        const changed: number[] = [];
+        for (let i = 0; i < this._runDims.length; i++) {
+            if (!this._runDims[i].equals(bestChoices[i], baseChoices[i])) {
+                changed.push(i);
+            }
+        }
+        // Nothing to attribute, or too many changes to afford a full-fidelity eval for each.
+        if (changed.length === 0 || changed.length > 12) {
+            return;
+        }
+
+        const trials = runOptions.finalTrials ?? DEFAULT_OPTIONS.finalTrials;
+        const ticks = runOptions.finalTicks ?? DEFAULT_OPTIONS.finalTicks;
+        this._status.textContent = 'Analyzing which changes carry the death risk…';
+
+        const rows: { label: string; without: Evaluation }[] = [];
+        try {
+            for (const i of changed) {
+                if (cancel.cancelled) {
+                    break;
+                }
+                applier.restore(result.bestSetup);
+                this._runDims[i].applyChoice(baseChoices[i]);
+                const without = await scorer.evaluateFresh(target, trials, ticks);
+                rows.push({ label: this._runDims[i].label, without });
+            }
+        } finally {
+            applier.restore(result.baselineSetup);
+        }
+        if (rows.length === 0) {
+            this._status.textContent = 'Done.';
+            return;
+        }
+
+        // Risky-first: the reversal that leaves the LOWEST remaining death rate leads the list.
+        rows.sort((a, b) => (a.without.deathRate ?? 1) - (b.without.deathRate ?? 1));
+        let html = `<div class="mcs-auto-optimize-section-title">Death-risk attribution</div>`;
+        html +=
+            `<div class="text-muted">The best setup re-simmed with each change individually reverted ` +
+            `(${trials} trials each). A big death-rate drop means that slot carries the risk; ` +
+            `the metric figure is what reverting it costs.</div><ul>`;
+        for (const row of rows) {
+            const death = `${(result.bestDeathRate * 100).toFixed(2)}% &rarr; ${(row.without.deathRate * 100).toFixed(2)}%`;
+            const metricPct =
+                Number.isFinite(row.without.metric) && Number.isFinite(result.bestMetric) && result.bestMetric !== 0
+                    ? `${(((row.without.metric - result.bestMetric) / Math.abs(result.bestMetric)) * 100).toFixed(1)}%`
+                    : '—';
+            const worstHit =
+                row.without.highestDamageTaken !== undefined && result.bestHighestDamageTaken !== undefined
+                    ? ` · worst hit ${this._format(result.bestHighestDamageTaken)} &rarr; ${this._format(row.without.highestDamageTaken)}`
+                    : '';
+            html += `<li><strong>${row.label}</strong> reverted: death ${death} · metric ${metricPct}${worstHit}</li>`;
+        }
+        html += `</ul>`;
+        this._results.insertAdjacentHTML('beforeend', html);
+        this._status.textContent = 'Done.';
     }
 
     private _itemName(itemId?: string): string {
