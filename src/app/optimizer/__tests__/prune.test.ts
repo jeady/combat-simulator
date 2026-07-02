@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { pruneDominated, relevantStatKeysForStyle, statSignature, StatVector } from 'src/app/optimizer/prune';
+import {
+    directStatsForDominance,
+    pruneDominated,
+    relevantStatKeysForStyle,
+    statSignature,
+    StatVector
+} from 'src/app/optimizer/prune';
 import { dedupeBySignature } from 'src/app/optimizer/dedupe';
 
 const KEYS = ['attack', 'strength', 'defence'];
@@ -81,6 +87,49 @@ describe('pruneDominated', () => {
         ];
 
         expect(ids(pruneDominated(items, []))).toEqual(['a', 'b']);
+    });
+});
+
+describe('directStatsForDominance (lower-is-better axis flip)', () => {
+    // Regression: attackSpeed is the attack INTERVAL (ms) — higher = slower = worse — but pruneDominated
+    // assumes higher-is-better on every axis. Without this flip a stat-pure SLOW weapon that ties/beats a
+    // FAST weapon on every bonus but has a larger attackSpeed wrongly "dominated" it, discarding the
+    // faster (possibly optimal-DPS) weapon before any sim ran. Negating attackSpeed makes the faster
+    // weapon the dominant one, the correct direction.
+    it('negates attackSpeed and leaves other stats untouched', () => {
+        expect(directStatsForDominance({ attackSpeed: 2400, strength: 10 })).toEqual({
+            attackSpeed: -2400,
+            strength: 10
+        });
+    });
+
+    it('negates a damage-type-suffixed attackSpeed key by its base key', () => {
+        expect(directStatsForDominance({ 'attackSpeed:melvorD:Normal': 3000, strength: 5 })).toEqual({
+            'attackSpeed:melvorD:Normal': -3000,
+            strength: 5
+        });
+    });
+
+    it('keeps a fast-weak and a slow-strong weapon BOTH on the frontier after the direction fix', () => {
+        // A fast, low-strength weapon vs a slow, high-strength one: a genuine trade-off, so both survive.
+        const fast: StatVector = { id: 'fast', stats: { attackSpeed: 2200, strength: 10 } };
+        const slowStrong: StatVector = { id: 'slowStrong', stats: { attackSpeed: 3200, strength: 50 } };
+
+        const directional = [fast, slowStrong].map(w => ({ id: w.id, stats: directStatsForDominance(w.stats) }));
+        const keys = [...new Set(directional.flatMap(w => Object.keys(w.stats)))];
+
+        expect(ids(pruneDominated(directional, keys))).toEqual(['fast', 'slowStrong']);
+    });
+
+    it('prunes an item that is strictly worse INCLUDING slower', () => {
+        // `good` is faster (lower attackSpeed) and stronger — it strictly dominates `bad` on both axes.
+        const good: StatVector = { id: 'good', stats: { attackSpeed: 2200, strength: 50 } };
+        const bad: StatVector = { id: 'bad', stats: { attackSpeed: 3200, strength: 10 } };
+
+        const directional = [good, bad].map(w => ({ id: w.id, stats: directStatsForDominance(w.stats) }));
+        const keys = [...new Set(directional.flatMap(w => Object.keys(w.stats)))];
+
+        expect(ids(pruneDominated(directional, keys))).toEqual(['good']);
     });
 });
 

@@ -28,6 +28,35 @@ export interface StatVector {
     stats: Record<string, number>;
 }
 
+/**
+ * `equipmentStats` keys where a HIGHER value is WORSE. Dominance (below) assumes higher-is-better on
+ * every axis; these are the exceptions. `attackSpeed` is the interval between attacks in ms — higher
+ * = slower = worse (see the offence stat table in equipment-controller.ts). Compared by BASE key, so a
+ * damage-type-suffixed key (`attackSpeed:<damageTypeId>`) counts too.
+ */
+export const LOWER_IS_BETTER_STAT_KEYS = new Set(['attackSpeed']);
+
+/** The base stat key of a (possibly damage-type-suffixed) key: `attackSpeed:melvorD:Normal` -> `attackSpeed`. */
+function baseStatKey(key: string): string {
+    const colon = key.indexOf(':');
+    return colon === -1 ? key : key.slice(0, colon);
+}
+
+/**
+ * Return a copy of `stats` with every lower-is-better key (see {@link LOWER_IS_BETTER_STAT_KEYS})
+ * negated, so the whole vector is on a uniform higher-is-better axis for {@link pruneDominated}.
+ * Negating flips the axis for those keys: after negation a FASTER weapon (lower attackSpeed => higher
+ * negated value) is the dominant one, which is the correct direction. Direction-agnostic keys pass
+ * through unchanged.
+ */
+export function directStatsForDominance(stats: Record<string, number>): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [key, value] of Object.entries(stats)) {
+        out[key] = LOWER_IS_BETTER_STAT_KEYS.has(baseStatKey(key)) ? -value : value;
+    }
+    return out;
+}
+
 /** Read a stat, treating an absent key as 0 (the Melvor default for an unset bonus). */
 function statValue(item: StatVector, key: string): number {
     const value = item.stats[key];
