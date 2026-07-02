@@ -20,7 +20,8 @@ import {
     ammoUsableWithWeapon,
     AttackTypeConstraint,
     resolveAttackTypeConstraint,
-    weaponAllowedByAttackType
+    weaponAllowedByAttackType,
+    weaponAllowedByTargetImmunity
 } from 'src/app/optimizer/weapon-rules';
 import { AnalyticMetric, CombatStats, estimateMetric, TargetStats } from 'src/app/optimizer/analytic-scorer';
 import { meanStdError } from 'src/app/optimizer/statistics';
@@ -151,6 +152,42 @@ export function isSupportedTarget(target: OptimizeTarget | undefined): boolean {
         return Lookup.getMonsterList(dungeonId).length > 0;
     }
     return true;
+}
+
+/**
+ * Damage-type ids that EVERY monster the target resolves to is immune to (a monster ignores attacker
+ * damage of any type in its own damage type's `immuneTo` set — e.g. abyssal monsters ignore Normal
+ * damage). Feeds the weapon-candidate filter: a weapon dealing such a type can never hurt the target,
+ * so simming it burns the full tick budget and fails. Intersecting across the target's monsters means
+ * a weapon is only dropped when it's useless in every fight the evaluation averages. Returns
+ * undefined when there's no target or nothing is universally immune (= no filtering).
+ */
+export function targetImmuneDamageTypeIds(target: OptimizeTarget | undefined): Set<string> | undefined {
+    if (!target) {
+        return undefined;
+    }
+    const taskId = slayerTaskTargetId(target);
+    const dungeonId = dungeonTargetId(target);
+    let monsters: Monster[];
+    if (taskId) {
+        monsters = Global.simulation.getAccessibleSlayerTaskMonsters(taskId);
+    } else if (dungeonId) {
+        monsters = Lookup.getMonsterList(dungeonId);
+    } else {
+        const monster = Global.game.monsters.getObjectByID(target.monsterId);
+        monsters = monster ? [monster] : [];
+    }
+
+    let immune: Set<string> | undefined;
+    for (const monster of monsters) {
+        const ids = new Set<string>();
+        (monster as any).damageType?.immuneTo?.forEach((type: { id: string }) => ids.add(type.id));
+        immune = immune === undefined ? ids : new Set([...immune].filter(id => ids.has(id)));
+        if (immune.size === 0) {
+            return undefined;
+        }
+    }
+    return immune?.size ? immune : undefined;
 }
 
 /** Resolve the target the user currently has selected on the Simulate page. */
@@ -553,7 +590,14 @@ export class GameCandidateProvider implements CandidateProvider {
          * the character's configured attack type (so a magic build isn't handed a melee weapon); `any`
          * searches every type. Also gates the Quiver slot (ammo is only relevant to a ranged weapon).
          */
-        private readonly attackTypeConstraint: AttackTypeConstraint = 'current'
+        private readonly attackTypeConstraint: AttackTypeConstraint = 'current',
+        /**
+         * Damage-type ids EVERY monster in the run's target is immune to (see
+         * {@link targetImmuneDamageTypeIds}). Weapons dealing such a type are dropped from the
+         * candidates up front — they can never hurt the target, so each sim would burn its whole tick
+         * budget and fail. undefined = no filtering.
+         */
+        private readonly targetImmunities?: ReadonlySet<string>
     ) {}
 
     public getCandidates(slotId: string): string[] {
@@ -587,6 +631,11 @@ export class GameCandidateProvider implements CandidateProvider {
             // Keep the weapon search on the chosen attack type (a weapon has a string attackType;
             // non-weapons don't, so they're never filtered here).
             if (!weaponAllowedByAttackType((item as any).attackType, attackTypeTarget)) {
+                return false;
+            }
+            // Drop weapons whose damage type the target is immune to — they can't hurt it at all,
+            // and each sim would burn the full tick budget before failing.
+            if (!weaponAllowedByTargetImmunity((item as any).damageType?.id, this.targetImmunities)) {
                 return false;
             }
             // Ammo is only useful to a matching ranged weapon — drop arrows/bolts for a melee or magic

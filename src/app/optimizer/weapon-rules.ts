@@ -48,6 +48,23 @@ export function weaponAllowedByAttackType(
 }
 
 /**
+ * Should a weapon candidate be kept given the damage-type immunities of the run's target? A monster
+ * ignores attacker damage of any type in its own damage type's `immuneTo` set (e.g. abyssal monsters
+ * ignore Normal damage), so a weapon dealing an immune type can never kill it — simming it just burns
+ * the full tick budget on every trial and fails. Non-weapons (no damage type) are never filtered
+ * here; with no immunity set, everything passes.
+ */
+export function weaponAllowedByTargetImmunity(
+    weaponDamageTypeId: string | undefined,
+    targetImmuneDamageTypeIds: ReadonlySet<string> | undefined
+): boolean {
+    if (weaponDamageTypeId === undefined || targetImmuneDamageTypeIds === undefined) {
+        return true;
+    }
+    return !targetImmuneDamageTypeIds.has(weaponDamageTypeId);
+}
+
+/**
  * Is an ammo item usable with the equipped weapon? Ammo (identified by having an `ammoType`) is only
  * useful to a ranged weapon whose `ammoTypeRequired` matches — otherwise it contributes nothing to the
  * fight (e.g. arrows on a melee build), so it shouldn't be a search candidate. Items with no ammo type

@@ -63,7 +63,8 @@ import {
     slayerTaskTargetId,
     dungeonTargetId,
     isSupportedTarget,
-    summonSynergyDimension
+    summonSynergyDimension,
+    targetImmuneDamageTypeIds
 } from 'src/app/optimizer/adapters';
 import { SummonChoice } from 'src/app/optimizer/synergy';
 
@@ -93,6 +94,7 @@ interface FakeItem {
     equipRequirements?: unknown;
     /** weapons only */
     attackType?: 'melee' | 'ranged' | 'magic';
+    damageType?: { id: string };
     ammoTypeRequired?: number;
     /** ammo only */
     ammoType?: number;
@@ -296,6 +298,27 @@ describe('GameCandidateProvider.getCandidates', () => {
         setGame(built2);
         expect(new GameCandidateProvider('all', 'any').getCandidates(WEAPON_SLOT).sort()).toEqual(
             ['magicStaff', 'meleeSword', 'rangedBow'].sort()
+        );
+    });
+
+    it('drops weapons whose damage type the target is immune to; non-weapons are never filtered', () => {
+        const items: FakeItem[] = [
+            // Same attack type + distinct stat keys so only the immunity filter decides.
+            { id: 'normalSword', validSlots: [{ id: WEAPON_SLOT }], owned: true, attackType: 'melee', damageType: { id: 'melvorD:Normal' }, equipmentStats: [{ key: 'a', value: 1 }] },
+            { id: 'abyssalSword', validSlots: [{ id: WEAPON_SLOT }], owned: true, attackType: 'melee', damageType: { id: 'melvorItA:Abyssal' }, equipmentStats: [{ key: 'b', value: 1 }] },
+            { id: 'helm', validSlots: [{ id: 'melvorD:Helmet' }], owned: true, equipmentStats: [{ key: 'c', value: 1 }] }
+        ];
+        // Target immune to Normal damage (e.g. an abyssal monster): the Normal-damage weapon is out.
+        setGame(buildGame(items));
+        const immune = new GameCandidateProvider('all', 'any', new Set(['melvorD:Normal']));
+        expect(immune.getCandidates(WEAPON_SLOT)).toEqual(['abyssalSword']);
+        // Non-weapons carry no damage type and must never be filtered by the immunity set.
+        expect(immune.getCandidates('melvorD:Helmet')).toEqual(['helm']);
+
+        // No immunity set (no target known): both weapons survive.
+        setGame(buildGame(items));
+        expect(new GameCandidateProvider('all', 'any').getCandidates(WEAPON_SLOT).sort()).toEqual(
+            ['abyssalSword', 'normalSword'].sort()
         );
     });
 
@@ -566,6 +589,55 @@ describe('slayerTaskTargetId / isSupportedTarget', () => {
         // No reachable task monster => unsupported (nothing to score).
         state.simulation = { getAccessibleSlayerTaskMonsters: (): { id: string }[] => [] };
         expect(isSupportedTarget({ monsterId: 'task:A' })).toBe(false);
+    });
+});
+
+/**
+ * targetImmuneDamageTypeIds — the weapon-candidate immunity gate. A monster ignores attacker damage
+ * of any type in its own damage type's `immuneTo` set; the helper intersects across the target's
+ * monsters so a weapon is only excluded when it's useless in EVERY fight the evaluation averages.
+ */
+describe('targetImmuneDamageTypeIds', () => {
+    /** A monster whose damage type is immune to the given attacker damage-type ids. */
+    const monster = (id: string, immuneTo: string[]): { id: string; damageType: { immuneTo: Set<{ id: string }> } } => ({
+        id,
+        damageType: { immuneTo: new Set(immuneTo.map(t => ({ id: t }))) }
+    });
+
+    it('returns undefined for no target, an unknown monster, or a monster with no immunities', () => {
+        expect(targetImmuneDamageTypeIds(undefined)).toBeUndefined();
+
+        state.game = { monsters: { getObjectByID: (): undefined => undefined } };
+        expect(targetImmuneDamageTypeIds({ monsterId: 'melvorD:Nope' })).toBeUndefined();
+
+        state.game = { monsters: { getObjectByID: () => monster('melvorD:Rat', []) } };
+        expect(targetImmuneDamageTypeIds({ monsterId: 'melvorD:Rat' })).toBeUndefined();
+    });
+
+    it("returns a plain monster's immune damage-type ids", () => {
+        state.game = { monsters: { getObjectByID: () => monster('itA:Bonearcher', ['melvorD:Normal']) } };
+        expect(targetImmuneDamageTypeIds({ monsterId: 'itA:Bonearcher' })).toEqual(new Set(['melvorD:Normal']));
+    });
+
+    it('intersects across a dungeon aggregate — only universally-useless damage types are excluded', () => {
+        isDungeonMock.mockImplementation(id => id === 'dung:A');
+        getMonsterListMock.mockReturnValue([
+            monster('m1', ['melvorD:Normal', 'melvorD:Fire']),
+            monster('m2', ['melvorD:Normal'])
+        ]);
+        expect(targetImmuneDamageTypeIds({ monsterId: 'dung:A' })).toEqual(new Set(['melvorD:Normal']));
+
+        // One monster with no immunities empties the intersection => no filtering at all.
+        getMonsterListMock.mockReturnValue([monster('m1', ['melvorD:Normal']), monster('m2', [])]);
+        expect(targetImmuneDamageTypeIds({ monsterId: 'dung:A' })).toBeUndefined();
+    });
+
+    it('resolves slayer-task targets through the accessible task monsters', () => {
+        isSlayerTaskMock.mockImplementation(id => id === 'task:A');
+        state.simulation = {
+            getAccessibleSlayerTaskMonsters: () => [monster('m1', ['melvorD:Normal']), monster('m2', ['melvorD:Normal'])]
+        };
+        expect(targetImmuneDamageTypeIds({ monsterId: 'task:A' })).toEqual(new Set(['melvorD:Normal']));
     });
 });
 

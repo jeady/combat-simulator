@@ -21,7 +21,8 @@ import {
     getSelectedTarget,
     isSupportedObjective,
     isSupportedTarget,
-    slayerTaskTargetId
+    slayerTaskTargetId,
+    targetImmuneDamageTypeIds
 } from 'src/app/optimizer/adapters';
 import {
     CancelToken,
@@ -456,11 +457,18 @@ export class AutoOptimizePage extends HTMLElement {
         const itemPool = Global.stores.optimizer.state.itemPool;
         // Consumables (food/potion/summons) follow the same pool at the coarse owned-vs-all level:
         // 'owned' and 'craftable' keep them owned-only (craftability is a gear concept), 'all' opens
-        // them up. Equipment gets the full tri-state via the candidate provider.
-        this._runDims = buildDimensions(applier, new GameCandidateProvider(itemPool, attackTypeConstraint), {
-            preRankTopK,
-            ownedOnly: itemPool !== 'all'
-        }).map(dim => (this._lockedDims.has(dim.id) ? lockedDimension(dim) : dim));
+        // them up. Equipment gets the full tri-state via the candidate provider. Weapons whose damage
+        // type can't hurt this run's target are dropped up front (they'd burn a full tick budget per
+        // sim just to fail — e.g. Normal-damage weapons against an abyssal monster).
+        const targetImmunities = targetImmuneDamageTypeIds(target);
+        this._runDims = buildDimensions(
+            applier,
+            new GameCandidateProvider(itemPool, attackTypeConstraint, targetImmunities),
+            {
+                preRankTopK,
+                ownedOnly: itemPool !== 'all'
+            }
+        ).map(dim => (this._lockedDims.has(dim.id) ? lockedDimension(dim) : dim));
         // Estimate total work up front (candidates × passes) to drive the progress bar + ETA. With
         // restarts, the same search runs once per seed, so the denominator scales by the seed count.
         this._estimatedEvals = this._estimateEvals() * restarts;
