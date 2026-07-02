@@ -96,6 +96,7 @@ export class CoordinateAscentOptimizer {
                     deathRate: evaluation.deathRate,
                     feasible: this.toScore(evaluation, opts.deathRateThreshold).feasible,
                     evaluations,
+                    stdError: evaluation.stdError,
                     setup
                 });
 
@@ -184,9 +185,13 @@ export class CoordinateAscentOptimizer {
                         return out;
                     };
 
-                    // Adaptive trials (§2e): screen all candidates cheaply, then confirm only the best
-                    // `screenKeep` at full fidelity. Skipped (confirm everything) when disabled or when
-                    // there aren't enough candidates to be worth a screen pass.
+                    // Adaptive trials (§2e): a successive-halving ladder. Instead of one cheap screen,
+                    // race the candidates over rungs of rising fidelity — start at `screenTrials`, triple
+                    // the trials each rung, and after every rung drop to the top max(screenKeep, ⌈k/3⌉)
+                    // survivors — then confirm the survivors at full `searchTrials`. More rungs cut sims
+                    // per slot further on large dimensions (e.g. the prayer dimension's 150+ candidates)
+                    // than the old 2-rung screen→confirm, which is the special case 3·screenTrials ≥
+                    // searchTrials. Skipped (confirm everything) when disabled or too few candidates.
                     let toConfirm = candidates;
                     if (
                         opts.screenTrials > 0 &&
@@ -194,13 +199,29 @@ export class CoordinateAscentOptimizer {
                         opts.screenKeep > 0 &&
                         candidates.length > opts.screenKeep
                     ) {
-                        const screened = await evalChoices(candidates, opts.screenTrials, screenAbortThreshold);
-                        if (cancel?.cancelled) {
-                            cancelled = true;
+                        let survivors = candidates;
+                        let rungTrials = opts.screenTrials;
+                        while (!cancelled) {
+                            const abort = opts.earlyStopOnDeath
+                                ? Math.floor(opts.deathRateThreshold * rungTrials) + 1
+                                : Infinity;
+                            const rung = await evalChoices(survivors, rungTrials, abort);
+                            if (cancel?.cancelled) {
+                                cancelled = true;
+                            }
+                            // Best-first by the same ordering as the accept test (margin 0 — this only
+                            // ranks candidates, it never commits), then keep the top survivors.
+                            rung.sort((a, b) => (this.better(a.score, b.score, 0) ? -1 : this.better(b.score, a.score, 0) ? 1 : 0));
+                            const keep = Math.max(opts.screenKeep, Math.ceil(rung.length / 3));
+                            survivors = rung.slice(0, keep).map(s => s.choice);
+                            // Stop once we're down to the confirm width, or the next rung would already
+                            // be at (or past) full fidelity — the confirm pass covers that trial count.
+                            if (survivors.length <= opts.screenKeep || 3 * rungTrials >= opts.searchTrials) {
+                                break;
+                            }
+                            rungTrials = Math.min(3 * rungTrials, opts.searchTrials);
                         }
-                        // Best-first by the same ordering as the accept test, then keep the top K.
-                        screened.sort((a, b) => (this.better(a.score, b.score, 0) ? -1 : this.better(b.score, a.score, 0) ? 1 : 0));
-                        toConfirm = screened.slice(0, opts.screenKeep).map(s => s.choice);
+                        toConfirm = survivors;
                     }
 
                     if (!cancelled) {
@@ -209,7 +230,7 @@ export class CoordinateAscentOptimizer {
                             opts.searchTrials,
                             searchAbortThreshold
                         )) {
-                            if (this.better(score, bestDimScore, opts.minImprovement, opts.significanceZ)) {
+                            if (this.better(score, bestDimScore, opts.minImprovement, opts.minRelImprovement, opts.significanceZ)) {
                                 bestDimScore = score;
                                 bestChoice = choice;
                                 bestDimEval = evaluation;
@@ -221,6 +242,41 @@ export class CoordinateAscentOptimizer {
                     }
 
                     if (!dim.equals(bestChoice, currentChoice)) {
+                        // Winner's-curse guard: the winning candidate is the max of N noisy samples, so
+                        // its estimate is biased high. When enabled and the scorer can bypass its cache,
+                        // re-simulate the proposed winner once and only commit if the fresh replicate
+                        // still clears the accept margin — committing with the replicate's (unbiased)
+                        // score, never the lucky sample. Reject => keep the incumbent (no runner-up).
+                        const fresh = this.scorer.evaluateFresh?.bind(this.scorer);
+                        if (opts.confirmSwaps && fresh) {
+                            this.applier.restore(incumbentSnap);
+                            dim.applyChoice(bestChoice);
+                            const replicateEval = await fresh(
+                                target,
+                                opts.searchTrials,
+                                opts.searchTicks,
+                                searchAbortThreshold
+                            );
+                            evaluations++;
+                            const replicateChoices = incumbentChoices.slice();
+                            replicateChoices[i] = bestChoice;
+                            emitEvent('evaluated', i, replicateChoices, replicateEval);
+                            const replicateScore = this.toScore(replicateEval, opts.deathRateThreshold);
+                            if (
+                                !this.better(
+                                    replicateScore,
+                                    bestScore,
+                                    opts.minImprovement,
+                                    opts.minRelImprovement,
+                                    opts.significanceZ
+                                )
+                            ) {
+                                continue; // the swap didn't replicate — keep the incumbent unchanged.
+                            }
+                            bestDimScore = replicateScore;
+                            bestDimEval = replicateEval;
+                        }
+
                         // Commit the winner, then snapshot the actual (conflict-resolved) setup.
                         this.applier.restore(incumbentSnap);
                         dim.applyChoice(bestChoice);
@@ -274,6 +330,12 @@ export class CoordinateAscentOptimizer {
                 baselineDeathRate: baselineDeath,
                 bestMetric: finalEval.metric,
                 bestDeathRate: finalEval.deathRate,
+                // Re-check feasibility at final fidelity: the winner was feasible at searchTrials, but
+                // the higher-trial finalize can reveal deaths the coarse search missed. Does not affect
+                // `improved` (that's still "did any dimension change").
+                bestFeasible: finalEval.success && finalEval.deathRate <= opts.deathRateThreshold,
+                baselineStdError: baseEval.stdError,
+                bestStdError: finalEval.stdError,
                 dimensionDiff,
                 evaluations,
                 improved: dimensionDiff.length > 0
@@ -302,17 +364,22 @@ export class CoordinateAscentOptimizer {
 
     /**
      * Is `a` strictly better than `b`? Feasibility dominates; among feasible setups the directed
-     * metric must clear a noise margin — the larger of the fixed `minImprovement` and a statistical
-     * `z × combinedStandardError` band, so a swap that's within Monte-Carlo noise is NOT accepted
-     * (status-quo bias). Among infeasible setups, prefer the one closer to surviving (lower death rate).
+     * metric must clear a noise margin — the largest of the fixed `minImprovement`, a RELATIVE floor
+     * `minRelImprovement × |incumbent value|` (a noise guard for scorers that can't estimate stdError),
+     * and a statistical `z × combinedStandardError` band — so a swap that's within Monte-Carlo noise
+     * is NOT accepted (status-quo bias). Among infeasible setups, prefer the one closer to surviving
+     * (lower death rate).
      */
-    private better(a: Score, b: Score, minImprovement: number, significanceZ = 0): boolean {
+    private better(a: Score, b: Score, minImprovement: number, minRelImprovement = 0, significanceZ = 0): boolean {
         if (a.feasible !== b.feasible) {
             return a.feasible;
         }
         if (a.feasible) {
+            // b.value is the incumbent; -Infinity (failed sim) has no meaningful magnitude, so the
+            // relative term contributes 0 there.
+            const relMargin = b.value === -Infinity ? 0 : minRelImprovement * Math.abs(b.value);
             const significanceMargin = significanceZ * Math.hypot(a.stdError, b.stdError);
-            return a.value > b.value + Math.max(minImprovement, significanceMargin);
+            return a.value > b.value + Math.max(minImprovement, relMargin, significanceMargin);
         }
         return a.deathRate < b.deathRate;
     }

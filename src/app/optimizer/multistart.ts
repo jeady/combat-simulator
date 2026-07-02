@@ -18,6 +18,7 @@
  */
 import {
     CancelToken,
+    EventCallback,
     OptimizeOptions,
     OptimizeResult,
     OptimizeTarget,
@@ -145,8 +146,10 @@ function directed(metric: number, maximize: boolean): number {
  * @param target     what to simulate against (passed through unchanged).
  * @param seeds      caller-supplied start states. With zero seeds the result is an error-shaped run.
  * @param options    optimizer options; `deathRateThreshold` also defines cross-seed feasibility.
- * @param onProgress optional per-seed progress (the optimizer's own progress is not forwarded here).
+ * @param onProgress optional per-seed progress (distinct from the optimizer's own per-pass progress).
  * @param cancel     cooperative cancellation token, threaded through and checked between seeds.
+ * @param onOptimizerProgress optional per-pass progress from each seed's inner optimizer run.
+ * @param onEvent    optional fine-grained events from each seed's inner optimizer run.
  */
 export async function multiStart(
     optimizer: CoordinateAscentOptimizer,
@@ -156,7 +159,9 @@ export async function multiStart(
     seeds: Seed[],
     options: Partial<OptimizeOptions> = {},
     onProgress?: MultiStartProgressCallback,
-    cancel?: CancelToken
+    cancel?: CancelToken,
+    onOptimizerProgress?: ProgressCallback,
+    onEvent?: EventCallback
 ): Promise<MultiStartResult> {
     if (seeds.length === 0) {
         throw new Error('multiStart requires at least one seed');
@@ -188,7 +193,7 @@ export async function multiStart(
             // (2) Install this seed as the world's start state, then optimize from it. The optimizer
             // snapshots its own baseline from here and restores to here in its finally.
             applier.restore(seed.snapshot);
-            const result = await optimizer.run(target, options, undefined, cancel);
+            const result = await optimizer.run(target, options, onOptimizerProgress, cancel, onEvent);
 
             seedSummaries.push({
                 id: seed.id,

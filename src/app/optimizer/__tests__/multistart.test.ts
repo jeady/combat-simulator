@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
 import { multiStart, Seed } from 'src/app/optimizer/multistart';
+import { OptimizeEvent, OptimizeProgress } from 'src/app/optimizer/types';
 import { cancelToken, FakeApplier, FakeCandidateProvider, FakeScorer, FakeWorld, TARGET } from 'src/app/optimizer/__tests__/fakes';
 
 /**
@@ -224,6 +225,43 @@ describe('multiStart', () => {
         expect(ms.seedSummaries).toHaveLength(2);
         expect(progress.map(p => p.seedId)).toEqual(['a', 'b']);
         expect(progress.every(p => p.seedCount === 2)).toBe(true);
+    });
+
+    it('forwards optimizer events and per-pass progress from every seed (A6)', async () => {
+        const items = [
+            { id: 'w1', slotId: 'weapon', power: 10 },
+            { id: 'w2', slotId: 'weapon', power: 20 }
+        ];
+        const world = new FakeWorld(['weapon'], items, { weapon: 'w1' });
+        const { optimizer, applier, scorer } = build(world);
+
+        const seeds: Seed[] = [
+            seedFromLoadout(world, applier, 'a', { weapon: 'w1' }),
+            seedFromLoadout(world, applier, 'b', { weapon: 'w2' })
+        ];
+        const seedProgress: { seedId: string }[] = [];
+        const optimizerProgress: OptimizeProgress[] = [];
+        const events: OptimizeEvent[] = [];
+
+        await multiStart(
+            optimizer,
+            applier,
+            scorer,
+            TARGET,
+            seeds,
+            {},
+            p => seedProgress.push(p),
+            undefined,
+            p => optimizerProgress.push(p),
+            e => events.push(e)
+        );
+
+        // Every seed's inner run emitted events (at least a baseline 'evaluated' each) and per-pass
+        // progress; the per-seed progress callback is unchanged (one entry per seed).
+        expect(seedProgress.map(p => p.seedId)).toEqual(['a', 'b']);
+        expect(events.filter(e => e.changedIndex === -1).length).toBe(2); // one baseline per seed
+        expect(optimizerProgress.length).toBeGreaterThan(0);
+        expect(optimizerProgress.some(p => p.phase === 'searching')).toBe(true);
     });
 
     it('throws when given no seeds', async () => {

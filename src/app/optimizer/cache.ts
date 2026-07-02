@@ -98,6 +98,24 @@ export class MemoizingScorer implements Scorer {
     }
 
     /**
+     * Fresh (winner's-curse) path: skip the cache lookup, run a genuinely fresh simulation, and
+     * OVERWRITE the cached entry with it — so a later {@link evaluate} of the same key serves the
+     * replicate rather than the original (possibly lucky) sample. Counts as a miss, since it always
+     * runs a real simulation.
+     */
+    public async evaluateFresh(
+        target: OptimizeTarget,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ): Promise<Evaluation> {
+        this.misses++;
+        const evaluation = await this.inner.evaluate(target, trials, ticks, deathAbortThreshold);
+        this.cache.set(this.keyFor(target, trials, ticks, deathAbortThreshold), evaluation);
+        return evaluation;
+    }
+
+    /**
      * Cached parallel path: serve any setups already in the cache for free, sim only the misses via
      * the inner scorer's batch dispatch (the worker pool), then store and return results aligned to
      * the input order. Cache semantics match {@link evaluate} — same key shape, one sample per key.

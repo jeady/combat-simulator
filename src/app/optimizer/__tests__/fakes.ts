@@ -197,6 +197,87 @@ export class FakeBatchScorer extends FakeScorer {
     }
 }
 
+/**
+ * A scorer that reports an INFLATED metric the first time a specific item is scored, then its true
+ * (lower) metric on every later evaluation of it. Models the winner's-curse setup A1 guards against:
+ * a lucky first sample beats the incumbent, but a fresh replicate reveals the real value. The world's
+ * power is used as the true metric; the inflation is added on top only on the item's first look.
+ *
+ * `evaluate` and `evaluateFresh` share the same seen-set, so the confirm replicate (via
+ * `evaluateFresh`) is the item's SECOND look and therefore returns the true value.
+ */
+export class InflatedFirstScorer extends FakeScorer {
+    private readonly seen = new Set<string>();
+    /** Fresh (winner's-curse-bypass) evaluations, counted separately from `evaluations`. */
+    public freshEvaluations = 0;
+
+    constructor(
+        private readonly infWorld: FakeWorld,
+        /** The item id whose first evaluation is inflated. */
+        private readonly inflatedItem: string,
+        /** How much to add to the true metric on the first look. */
+        private readonly inflation: number,
+        opts: FakeScorerOptions = {}
+    ) {
+        super(infWorld, opts);
+    }
+
+    private inflate(evaluation: Evaluation): Evaluation {
+        // Inflate only the first time the target item is the one equipped.
+        if (this.infWorld.current.get('weapon') === this.inflatedItem && !this.seen.has(this.inflatedItem)) {
+            this.seen.add(this.inflatedItem);
+            return { ...evaluation, metric: evaluation.metric + this.inflation };
+        }
+        return evaluation;
+    }
+
+    public async evaluate(
+        target: OptimizeTarget,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ): Promise<Evaluation> {
+        return this.inflate(await super.evaluate(target, trials, ticks, deathAbortThreshold));
+    }
+
+    public async evaluateFresh(
+        target: OptimizeTarget,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ): Promise<Evaluation> {
+        this.freshEvaluations++;
+        // Shares the seen-set with evaluate, so the replicate is a second look => the true value.
+        return this.inflate(await super.evaluate(target, trials, ticks, deathAbortThreshold));
+    }
+}
+
+/**
+ * A scorer that is DEATHLESS at search fidelity but reports deaths at final fidelity — models A3's
+ * "feasible at 200 trials, dies at 1000" case. Death rate is 0 while `trials <= searchTrials`, and
+ * `finalDeathRate` once `trials` exceeds it. Metric always comes from the world.
+ */
+export class LateDeathScorer extends FakeScorer {
+    constructor(
+        private readonly ldWorld: FakeWorld,
+        private readonly searchTrials: number,
+        private readonly finalDeathRate: number,
+        opts: FakeScorerOptions = {}
+    ) {
+        super(ldWorld, opts);
+    }
+
+    public async evaluate(
+        target: OptimizeTarget,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ): Promise<Evaluation> {
+        const base = await super.evaluate(target, trials, ticks, deathAbortThreshold);
+        return { ...base, deathRate: trials > this.searchTrials ? this.finalDeathRate : 0 };
+    }
+}
+
 export function cancelToken(): CancelToken {
     return { cancelled: false };
 }

@@ -56,6 +56,16 @@ export interface Scorer {
         ticks: number,
         deathAbortThreshold?: number
     ): Promise<Evaluation>;
+    /**
+     * Like {@link evaluate}, but must bypass any memoization and run a genuinely fresh simulation;
+     * implementations backed by a cache must overwrite the cached entry with the fresh result.
+     */
+    evaluateFresh?(
+        target: OptimizeTarget,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ): Promise<Evaluation>;
     /** True if the selected objective is maximized (kills/hr, xp/hr); false to minimize (deathRate, food used). */
     isMaximize(): boolean;
     /**
@@ -147,6 +157,22 @@ export interface OptimizeOptions {
     /** Require this much directed-metric gain to accept a swap (absolute noise guard). Default 0. */
     minImprovement: number;
     /**
+     * Require the directed metric to improve by at least this FRACTION of the incumbent's value (a
+     * noise floor for scorers that can't estimate stdError). The accept margin is
+     * max(minImprovement, minRelImprovement·|incumbent|, z·hypot(seA, seB)). Default 0.
+     */
+    minRelImprovement: number;
+    /**
+     * Confirm a candidate swap with a fresh replicate before committing it (winner's-curse guard).
+     * A dimension evaluates dozens of noisy candidates and takes the best; max-of-N selection biases
+     * the winner's estimate high, so a lucky roll can beat the incumbent by chance. When on (default)
+     * and the scorer supports {@link Scorer.evaluateFresh}, the optimizer re-simulates the proposed
+     * winner once more and only commits if the REPLICATE still clears the accept margin — and commits
+     * with the replicate's (unbiased) score, not the lucky sample. Default true. See
+     * `docs/auto-optimize-search.md`.
+     */
+    confirmSwaps: boolean;
+    /**
      * Statistical-significance guard (§ significance). A swap is accepted only if the metric improves
      * by more than `significanceZ × combinedStandardError` (as well as `minImprovement`), so a change
      * that's within Monte-Carlo noise is never recommended — a status-quo bias toward the incumbent.
@@ -183,6 +209,8 @@ export const DEFAULT_OPTIONS: OptimizeOptions = {
     maxPasses: 3,
     deathRateThreshold: 0,
     minImprovement: 0,
+    minRelImprovement: 0,
+    confirmSwaps: true,
     significanceZ: 1.645,
     earlyStopOnDeath: true,
     screenTrials: 0,
@@ -227,6 +255,8 @@ export interface OptimizeEvent {
     feasible: boolean;
     /** Total simulations run so far (matches {@link OptimizeProgress.evaluations}). */
     evaluations: number;
+    /** Standard error of {@link metric} for this evaluation, if the scorer estimated it. */
+    stdError?: number;
     /** Accurate conflict-resolved snapshot of the setup. Present on `best-improved`. */
     setup?: unknown;
 }
@@ -242,6 +272,15 @@ export interface OptimizeResult {
     baselineDeathRate: number;
     bestMetric: number;
     bestDeathRate: number;
+    /**
+     * True iff the final full-fidelity re-score satisfies the death-rate threshold; false means the
+     * recommendation violates the survival constraint at higher fidelity.
+     */
+    bestFeasible: boolean;
+    /** Standard error of {@link baselineMetric} from the baseline evaluation, if estimated. */
+    baselineStdError?: number;
+    /** Standard error of {@link bestMetric} from the final re-score, if estimated. */
+    bestStdError?: number;
     /** Per-dimension changes from baseline to best. */
     dimensionDiff: DimensionChange[];
     evaluations: number;

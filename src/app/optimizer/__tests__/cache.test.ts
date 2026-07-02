@@ -161,6 +161,25 @@ describe('MemoizingScorer', () => {
         });
     });
 
+    describe('evaluateFresh (A1 winner\'s-curse bypass)', () => {
+        it('bypasses the cache, overwrites the entry, and later evaluate serves the fresh value', async () => {
+            const inner = new CountingScorer();
+            const scorer = new MemoizingScorer(inner, () => 'setupA');
+
+            const first = await scorer.evaluate(TARGET, 200, 1000); // metric 1, cached
+            const fresh = await scorer.evaluateFresh(TARGET, 200, 1000); // metric 2, overwrites cache
+            const after = await scorer.evaluate(TARGET, 200, 1000); // served from cache
+
+            expect(first.metric).toBe(1);
+            expect(fresh.metric).toBe(2); // a genuinely fresh simulation, not the cached 1
+            expect(inner.calls).toBe(2); // evaluate + evaluateFresh both simulated; the trailing evaluate did not
+            expect(after).toEqual(fresh); // the overwritten entry now serves the replicate
+            // evaluateFresh counts as a miss (it always runs a real sim); the trailing evaluate is a hit.
+            expect(scorer.misses).toBe(2);
+            expect(scorer.hits).toBe(1);
+        });
+    });
+
     it('clear() drops cached results and resets counters', async () => {
         const inner = new CountingScorer();
         const scorer = new MemoizingScorer(inner, () => 'setupA');
