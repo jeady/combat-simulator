@@ -1134,6 +1134,14 @@ export class AutoOptimizePage extends HTMLElement {
             `<div class="mcs-auto-optimize-section-title">Best setup found (local search — not guaranteed optimal)</div>` +
             `<div>baseline ${baseline} &rarr; best ${best}</div>`;
 
+        // Survivability context for the recommendation: the worst single hit each setup took. Shows
+        // why a metric-tied pick broke the way it did (ties prefer the lower worst-hit).
+        if (result.baselineHighestDamageTaken !== undefined && result.bestHighestDamageTaken !== undefined) {
+            html +=
+                `<div class="text-muted">Worst hit taken: ${this._format(result.baselineHighestDamageTaken)}` +
+                ` &rarr; ${this._format(result.bestHighestDamageTaken)}</div>`;
+        }
+
         // A recommendation that survived the low-fidelity search but DIED at full trials is dangerous —
         // it looks safe but isn't. Warn unmissably above Apply (which stays enabled — the user decides).
         if (result.improved && result.bestFeasible === false) {

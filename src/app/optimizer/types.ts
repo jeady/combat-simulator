@@ -36,6 +36,14 @@ export interface Evaluation {
      * fixed `minImprovement` margin.
      */
     stdError?: number;
+    /**
+     * The worst single hit taken during the evaluation (the game's "Highest Hit Taken"). Used as a
+     * survivability TIE-BREAKER: among candidates whose metrics are within the noise margin of each
+     * other, the optimizer prefers the one with the lowest worst-hit — spike damage is what breaks
+     * the auto-eat threshold, so this picks the safer of two equivalent setups. Never overrides a
+     * genuine metric win. Undefined when the scorer doesn't measure it (e.g. the analytic surrogate).
+     */
+    highestDamageTaken?: number;
 }
 
 /**
@@ -287,6 +295,10 @@ export interface OptimizeResult {
     baselineStdError?: number;
     /** Standard error of {@link bestMetric} from the final re-score, if estimated. */
     bestStdError?: number;
+    /** Worst single hit taken by the baseline setup, if the scorer measured it. */
+    baselineHighestDamageTaken?: number;
+    /** Worst single hit taken by the best setup at the final re-score, if measured. */
+    bestHighestDamageTaken?: number;
     /** Per-dimension changes from baseline to best. */
     dimensionDiff: DimensionChange[];
     evaluations: number;

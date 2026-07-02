@@ -7,6 +7,7 @@ import {
     FakeApplier,
     FakeBatchScorer,
     FakeCandidateProvider,
+    FakeItem,
     FakeScorer,
     FakeWorld,
     InflatedFirstScorer,
@@ -769,6 +770,66 @@ describe('CoordinateAscentOptimizer', () => {
             // filtering on trials >= searchTrials keeps exactly these, never a screening sample.
             expect(events[0].trials).toBe(40);
             expect(events.filter(e => e.type === 'best-improved').every(e => e.trials === 40)).toBe(true);
+        });
+    });
+
+    describe('survivability tie-breaker (worst hit taken)', () => {
+        /** FakeScorer that also reports a per-weapon worst-hit-taken (the survivability channel). */
+        class HitScorer extends FakeScorer {
+            constructor(private readonly w: FakeWorld, private readonly hits: Record<string, number>) {
+                super(w);
+            }
+            public async evaluate(t: OptimizeTarget, tr: number, ti: number, ab?: number) {
+                const weapon = this.w.current.get('weapon') ?? '';
+                return { ...(await super.evaluate(t, tr, ti, ab)), highestDamageTaken: this.hits[weapon] };
+            }
+        }
+
+        const world = (a: FakeItem, b: FakeItem) =>
+            new FakeWorld(['weapon'], [{ id: 'cur', slotId: 'weapon', power: 10 }, a, b], { weapon: 'cur' });
+
+        const run = (w: FakeWorld, hits: Record<string, number>, minImprovement = 0) => {
+            const applier = new FakeApplier(w);
+            const optimizer = new CoordinateAscentOptimizer(
+                new HitScorer(w, hits),
+                equipmentDimensions(applier, new FakeCandidateProvider(w)),
+                applier
+            );
+            return optimizer.run(TARGET, { minImprovement, maxPasses: 1 });
+        };
+
+        it('picks the safer of two metric-tied candidates (order/luck no longer decides)', async () => {
+            // Equal power => neither is better(…) than the other; 'a' is found first but 'b' is safer.
+            const w = world({ id: 'a', slotId: 'weapon', power: 20 }, { id: 'b', slotId: 'weapon', power: 20 });
+            const result = await run(w, { cur: 300, a: 500, b: 100 });
+            expect(setup(result).get('weapon')).toBe('b');
+        });
+
+        it('ties are measured by the accept margin, not exact equality', async () => {
+            // 21 vs 20 is inside the minImprovement(5) margin => tied; the safer 'b' wins despite the
+            // (noise-level) metric edge of 'a'. Both clear the incumbent (10) by more than the margin.
+            const w = world({ id: 'a', slotId: 'weapon', power: 21 }, { id: 'b', slotId: 'weapon', power: 20 });
+            const result = await run(w, { cur: 300, a: 500, b: 50 }, 5);
+            expect(setup(result).get('weapon')).toBe('b');
+        });
+
+        it('never overrides a genuine metric win', async () => {
+            // 'a' truly beats 'b' on the metric; b's perfect safety must not flip the pick.
+            const w = world({ id: 'a', slotId: 'weapon', power: 30 }, { id: 'b', slotId: 'weapon', power: 20 });
+            const result = await run(w, { cur: 300, a: 500, b: 0 });
+            expect(setup(result).get('weapon')).toBe('a');
+        });
+
+        it('without a survivability channel the metric-first pick is unchanged', async () => {
+            const w = world({ id: 'a', slotId: 'weapon', power: 20 }, { id: 'b', slotId: 'weapon', power: 20 });
+            const applier = new FakeApplier(w);
+            const optimizer = new CoordinateAscentOptimizer(
+                new FakeScorer(w),
+                equipmentDimensions(applier, new FakeCandidateProvider(w)),
+                applier
+            );
+            const result = await optimizer.run(TARGET, { maxPasses: 1 });
+            expect(setup(result).get('weapon')).toBe('a'); // first metric-max found; no channel, no tie-break
         });
     });
 

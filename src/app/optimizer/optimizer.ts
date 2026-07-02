@@ -63,6 +63,8 @@ interface Score {
     deathRate: number;
     /** Standard error of the metric (Monte-Carlo noise), or 0 if the scorer didn't estimate it. */
     stdError: number;
+    /** Survivability tie-breaker: worst single hit taken (lower is safer); undefined if unmeasured. */
+    survival?: number;
 }
 
 export class CoordinateAscentOptimizer {
@@ -273,16 +275,35 @@ export class CoordinateAscentOptimizer {
                     }
 
                     if (!cancelled) {
-                        for (const { choice, score, evaluation } of await evalChoices(
-                            toConfirm,
-                            opts.searchTrials,
-                            searchAbortThreshold
-                        )) {
+                        const confirmed = await evalChoices(toConfirm, opts.searchTrials, searchAbortThreshold);
+                        for (const { choice, score, evaluation } of confirmed) {
                             if (this.better(score, bestDimScore, opts.minImprovement, opts.minRelImprovement, opts.significanceZ)) {
                                 bestDimScore = score;
                                 bestChoice = choice;
                                 bestDimEval = evaluation;
                             }
+                        }
+                        // Survivability tie-break: among candidates that (a) beat the incumbent on the
+                        // metric and (b) are within the noise margin of the metric-best, the metric
+                        // ordering is arbitrary (max-of-noisy-samples luck) — prefer the one with the
+                        // lowest worst-hit-taken instead. Never overrides a genuine metric win: anyone
+                        // the metric-best truly beats fails (b) and can't enter the pool.
+                        if (!dim.equals(bestChoice, currentChoice)) {
+                            let pick = { score: bestDimScore, choice: bestChoice, evaluation: bestDimEval };
+                            for (const c of confirmed) {
+                                if (
+                                    c.score.survival === undefined ||
+                                    (pick.score.survival !== undefined && c.score.survival >= pick.score.survival) ||
+                                    !this.better(c.score, bestScore, opts.minImprovement, opts.minRelImprovement, opts.significanceZ) ||
+                                    this.better(bestDimScore, c.score, opts.minImprovement, opts.minRelImprovement, opts.significanceZ)
+                                ) {
+                                    continue;
+                                }
+                                pick = c;
+                            }
+                            bestDimScore = pick.score;
+                            bestChoice = pick.choice;
+                            bestDimEval = pick.evaluation;
                         }
                         if (cancel?.cancelled) {
                             cancelled = true;
@@ -384,6 +405,8 @@ export class CoordinateAscentOptimizer {
                 bestFeasible: finalEval.success && finalEval.deathRate <= opts.deathRateThreshold,
                 baselineStdError: baseEval.stdError,
                 bestStdError: finalEval.stdError,
+                baselineHighestDamageTaken: baseEval.highestDamageTaken,
+                bestHighestDamageTaken: finalEval.highestDamageTaken,
                 dimensionDiff,
                 evaluations,
                 improved: dimensionDiff.length > 0
@@ -406,7 +429,8 @@ export class CoordinateAscentOptimizer {
             value,
             deathRate: usable ? evaluation.deathRate : Infinity,
             // stdError is symmetric under the minimize sign-flip, so the raw value carries over.
-            stdError: usable && Number.isFinite(evaluation.stdError) ? (evaluation.stdError as number) : 0
+            stdError: usable && Number.isFinite(evaluation.stdError) ? (evaluation.stdError as number) : 0,
+            survival: usable && Number.isFinite(evaluation.highestDamageTaken) ? evaluation.highestDamageTaken : undefined
         };
     }
 

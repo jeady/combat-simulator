@@ -287,11 +287,19 @@ export class GameScorer implements Scorer {
             return { metric: NaN, deathRate: Infinity, success: false };
         }
         const deathRate = datas.reduce((sum, data) => sum + (data.deathRate ?? 0), 0) / datas.length;
+        // Worst single hit across all sub-runs — the spike the survivability tie-breaker cares about.
+        const highestDamageTaken = Math.max(...datas.map(data => data.highestDamageTaken ?? 0));
         if (metrics.length < 2) {
-            return { metric: metrics[0], deathRate, success: true };
+            return { metric: metrics[0], deathRate, success: true, highestDamageTaken };
         }
         const { mean, stdError } = meanStdError(metrics);
-        return { metric: mean, deathRate, success: true, stdError: Number.isFinite(stdError) ? stdError : undefined };
+        return {
+            metric: mean,
+            deathRate,
+            success: true,
+            stdError: Number.isFinite(stdError) ? stdError : undefined,
+            highestDamageTaken
+        };
     }
 
     /**
@@ -413,7 +421,13 @@ export class GameScorer implements Scorer {
         );
 
         const metric = Global.simulation.getBarValue(true, averageData);
-        return { metric, deathRate: averageData.deathRate ?? 0, success: !Number.isNaN(metric) };
+        return {
+            metric,
+            deathRate: averageData.deathRate ?? 0,
+            success: !Number.isNaN(metric),
+            // The averager already folds this as the max across the entity's monsters.
+            highestDamageTaken: averageData.highestDamageTaken
+        };
     }
 
     /**
