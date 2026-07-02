@@ -257,6 +257,12 @@ export interface OptimizeEvent {
     evaluations: number;
     /** Standard error of {@link metric} for this evaluation, if the scorer estimated it. */
     stdError?: number;
+    /**
+     * Trial count this evaluation ran at. Screening-rung evaluations run below `searchTrials` and
+     * are both noisier and max-selection biased, so consumers ranking setups (e.g. a leaderboard)
+     * should skip or down-weight entries below full search fidelity.
+     */
+    trials?: number;
     /** Accurate conflict-resolved snapshot of the setup. Present on `best-improved`. */
     setup?: unknown;
 }

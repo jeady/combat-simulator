@@ -87,6 +87,7 @@ export class CoordinateAscentOptimizer {
                 changedIndex: number,
                 choices: DimensionChoice[],
                 evaluation: Evaluation,
+                trials: number,
                 setup?: unknown
             ) =>
                 onEvent?.({
@@ -98,11 +99,12 @@ export class CoordinateAscentOptimizer {
                     feasible: this.toScore(evaluation, opts.deathRateThreshold).feasible,
                     evaluations,
                     stdError: evaluation.stdError,
+                    trials,
                     setup
                 });
 
             // The baseline is the first point on the leaderboard / live view.
-            emitEvent('evaluated', -1, incumbentChoices, baseEval, incumbentSnap);
+            emitEvent('evaluated', -1, incumbentChoices, baseEval, opts.searchTrials, incumbentSnap);
 
             const emit = (
                 phase: OptimizeResult['status'] | 'searching' | 'finalizing',
@@ -147,11 +149,11 @@ export class CoordinateAscentOptimizer {
                     // Record one finished candidate evaluation: bump the counter, emit the live event
                     // (incumbent with just this dimension swapped), and score it. Shared by the serial
                     // and parallel paths so their bookkeeping is identical.
-                    const recordEval = (choice: DimensionChoice, evaluation: Evaluation) => {
+                    const recordEval = (choice: DimensionChoice, evaluation: Evaluation, trials: number) => {
                         evaluations++;
                         const candidateChoices = incumbentChoices.slice();
                         candidateChoices[i] = choice;
-                        emitEvent('evaluated', i, candidateChoices, evaluation);
+                        emitEvent('evaluated', i, candidateChoices, evaluation, trials);
                         return { choice, score: this.toScore(evaluation, opts.deathRateThreshold), evaluation };
                     };
 
@@ -180,13 +182,13 @@ export class CoordinateAscentOptimizer {
                                 }
                             }
                             const evals = await batch(setups, target, trials, opts.searchTicks, abort);
-                            return choices.map((choice, idx) => recordEval(choice, evals[idx]));
+                            return choices.map((choice, idx) => recordEval(choice, evals[idx], trials));
                         }
                         const out: { choice: DimensionChoice; score: Score; evaluation: Evaluation }[] = [];
                         for (const choice of choices) {
                             applyOnIncumbent(choice);
                             const evaluation = await this.scorer.evaluate(target, trials, opts.searchTicks, abort);
-                            out.push(recordEval(choice, evaluation));
+                            out.push(recordEval(choice, evaluation, trials));
                             if (cancel?.cancelled) {
                                 break;
                             }
@@ -274,7 +276,7 @@ export class CoordinateAscentOptimizer {
                             evaluations++;
                             const replicateChoices = incumbentChoices.slice();
                             replicateChoices[i] = bestChoice;
-                            emitEvent('evaluated', i, replicateChoices, replicateEval);
+                            emitEvent('evaluated', i, replicateChoices, replicateEval, opts.searchTrials);
                             const replicateScore = this.toScore(replicateEval, opts.deathRateThreshold);
                             if (
                                 !this.better(
@@ -302,7 +304,7 @@ export class CoordinateAscentOptimizer {
                         // new global best with the accurate snapshot for the UI's "new best" feed.
                         incumbentChoices = dims.map(d => d.getCurrentChoice());
                         if (bestDimEval) {
-                            emitEvent('best-improved', i, incumbentChoices, bestDimEval, incumbentSnap);
+                            emitEvent('best-improved', i, incumbentChoices, bestDimEval, opts.searchTrials, incumbentSnap);
                         }
                     }
                 }

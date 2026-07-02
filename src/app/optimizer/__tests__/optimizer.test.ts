@@ -743,6 +743,33 @@ describe('CoordinateAscentOptimizer', () => {
             expect(result.baselineStdError).toBeUndefined();
             expect(result.bestStdError).toBeUndefined();
         });
+
+        it('stamps every event with the trial count its evaluation ran at (rungs below searchTrials)', async () => {
+            // 6 candidates + screening => a rung at screenTrials(10), then confirms at searchTrials(40).
+            const world = new FakeWorld(
+                ['weapon'],
+                Array.from({ length: 6 }, (_, n) => ({ id: `c${n}`, slotId: 'weapon', power: n })),
+                { weapon: 'c0' }
+            );
+            const { optimizer } = build(world);
+            const events: OptimizeEvent[] = [];
+
+            await optimizer.run(
+                TARGET,
+                { searchTrials: 40, screenTrials: 10, screenKeep: 2 },
+                undefined,
+                undefined,
+                e => events.push(e)
+            );
+
+            // Every event carries a fidelity; rung evals are stamped 10, baseline/confirm/replicate 40.
+            expect(events.every(e => e.trials === 10 || e.trials === 40)).toBe(true);
+            expect(events.some(e => e.trials === 10)).toBe(true);
+            // The baseline and the winning (best-improved) entry are full-fidelity — a leaderboard
+            // filtering on trials >= searchTrials keeps exactly these, never a screening sample.
+            expect(events[0].trials).toBe(40);
+            expect(events.filter(e => e.type === 'best-improved').every(e => e.trials === 40)).toBe(true);
+        });
     });
 
     describe('successive-halving ladder (A4)', () => {

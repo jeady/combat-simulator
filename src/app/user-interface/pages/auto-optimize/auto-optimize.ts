@@ -159,6 +159,8 @@ export class AutoOptimizePage extends HTMLElement {
     private _onPage?: (id: PageId) => void;
     /** The target the active run captured at start; pins the header while the run is in flight. */
     private _runTarget?: OptimizeTarget;
+    /** The active run's full search fidelity; leaderboard entries below this are screening noise. */
+    private _runSearchTrials = 0;
     private _leaderboardSig = '';
     /** Progress-bar/ETA bookkeeping: rough total-evaluation estimate + run start time. */
     private _estimatedEvals = 1;
@@ -420,6 +422,7 @@ export class AutoOptimizePage extends HTMLElement {
         const cancel: CancelToken = { cancelled: false };
         this._cancel = cancel;
         this._runTarget = target;
+        this._runSearchTrials = searchTrials;
         this._refreshObjective();
         this._result = undefined;
         this._apply.disabled = true;
@@ -719,9 +722,13 @@ export class AutoOptimizePage extends HTMLElement {
             this._baseCaption.textContent = this._scoreCaption('Current', event);
         }
 
+        // Only full-fidelity evaluations may rank on the leaderboard: screening-rung evals run at a
+        // fraction of the trials, and picking the max of many noisy samples selects for lucky rolls —
+        // a low-trial outlier would sit at #1 above the search's actual (confirmed) best.
+        const fullFidelity = event.trials === undefined || event.trials >= this._runSearchTrials;
         const key = JSON.stringify(event.choices);
         const existing = this._leaderboardMap.get(key);
-        if (!existing || this._directed(event.metric) > this._directed(existing.metric)) {
+        if (fullFidelity && (!existing || this._directed(event.metric) > this._directed(existing.metric))) {
             this._leaderboardMap.set(key, {
                 key,
                 choices: event.choices,
