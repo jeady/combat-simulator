@@ -28,6 +28,7 @@ import {
     CancelToken,
     DEFAULT_OPTIONS,
     Dimension,
+    DimensionChange,
     DimensionChoice,
     OptimizeEvent,
     OptimizeOptions,
@@ -175,6 +176,14 @@ export class AutoOptimizePage extends HTMLElement {
     /** Restart seeds still to run after the current one + the per-seed estimate, for bar rescaling. */
     private _seedsRemaining = 0;
     private _perSeedEvals = 1;
+    /**
+     * Described agility-course/cartography-POI state captured at run start (the world mutates during
+     * the search), shown under the Current/Best gear grids. The best panel overlays the progression
+     * pass's dimensionDiff on top.
+     */
+    private _progressionCurrent: { id: string; label: string; text: string }[] = [];
+    private _baseProgression?: HTMLDivElement;
+    private _bestProgression?: HTMLDivElement;
     private _leaderboardSig = '';
     /** Progress-bar/ETA bookkeeping: rough total-evaluation estimate + run start time. */
     private _estimatedEvals = 1;
@@ -509,6 +518,20 @@ export class AutoOptimizePage extends HTMLElement {
                 ownedOnly: itemPool !== 'all'
             }
         ).map(dim => (this._lockedDims.has(dim.id) ? lockedDimension(dim) : dim));
+        // Progression context for the gear panels: the agility course + cartography POI in use (for
+        // the target's realm). Snapshot the DESCRIBED values now — the world mutates during the
+        // search. The best panel overlays the progression pass's changes when the run completes.
+        const targetMonster = Global.game.monsters.getObjectByID(target.monsterId);
+        const targetRealmId = targetMonster ? Global.game.getMonsterArea(targetMonster).realm?.id : undefined;
+        const progressionDims = [...(targetRealmId ? agilityDimensions(targetRealmId) : []), ...cartographyDimensions()];
+        this._progressionCurrent = progressionDims.map(dim => ({
+            id: dim.id,
+            label: dim.label,
+            text: dim.describe(dim.getCurrentChoice())
+        }));
+        if (this._baseProgression) {
+            this._baseProgression.innerHTML = this._progressionLines().join('<br>');
+        }
         // Estimate total work up front (candidates × passes) to drive the progress bar + ETA. With
         // restarts, the same search runs once per seed, so the denominator scales by the seed count.
         this._perSeedEvals = this._estimateEvals();
@@ -734,11 +757,17 @@ export class AutoOptimizePage extends HTMLElement {
         this._liveGridHost.innerHTML = '';
         this._liveGrid = new LiveLoadoutGrid();
         this._liveGridHost.appendChild(this._liveGrid.element);
+        // Agility/cartography strip — empty while candidates stream (the search never varies them
+        // live); filled with the winner's progression state when the run completes.
+        this._bestProgression = createElement('div', { classList: ['mcs-ao-progression', 'text-muted'] });
+        this._liveGridHost.appendChild(this._bestProgression);
 
         this._baseCaption.textContent = '';
         this._baseGridHost.innerHTML = '';
         this._baseGrid = new LiveLoadoutGrid();
         this._baseGridHost.appendChild(this._baseGrid.element);
+        this._baseProgression = createElement('div', { classList: ['mcs-ao-progression', 'text-muted'] });
+        this._baseGridHost.appendChild(this._baseProgression);
 
         this._progressBar.style.display = '';
         this._progressBarFill.style.width = '0%';
@@ -1193,6 +1222,33 @@ export class AutoOptimizePage extends HTMLElement {
             ? `${this._format(result.bestMetric)}${this._metricUnit()}`
             : '—';
         this._liveCaption.textContent = `${metric} · ${(result.bestDeathRate * 100).toFixed(1)}% death`;
+        if (this._bestProgression) {
+            const lines = this._progressionLines(result.improved ? result.dimensionDiff : undefined);
+            this._bestProgression.innerHTML = lines.join('<br>');
+        }
+    }
+
+    /**
+     * One line per progression lever for the gear panels: the agility course (obstacles joined) and
+     * the cartography POI. `diff` (a completed run's dimensionDiff) overrides entries the staged
+     * progression pass changed — its from/to are already described names.
+     */
+    private _progressionLines(diff?: DimensionChange[]): string[] {
+        if (this._progressionCurrent.length === 0) {
+            return [];
+        }
+        const value = (entry: { id: string; text: string }) =>
+            diff?.find(change => change.dimensionId === entry.id)?.to ?? entry.text;
+        const agility = this._progressionCurrent.filter(entry => entry.id.startsWith('agility-'));
+        const rest = this._progressionCurrent.filter(entry => !entry.id.startsWith('agility-'));
+        const lines: string[] = [];
+        if (agility.length > 0) {
+            lines.push(`<strong>Agility:</strong> ${agility.map(value).join(' · ')}`);
+        }
+        for (const entry of rest) {
+            lines.push(`<strong>${entry.label}:</strong> ${value(entry)}`);
+        }
+        return lines;
     }
 
     private _itemName(itemId?: string): string {
