@@ -23,6 +23,38 @@ import {
 } from 'src/app/optimizer/types';
 import { YIELD_STRIDE, yieldToEventLoop } from 'src/app/optimizer/parallel';
 
+/**
+ * How many evaluations one dimension of `candidates` non-incumbent choices costs under the
+ * successive-halving ladder + confirm pass — the exact accounting of the rung loop in
+ * {@link CoordinateAscentOptimizer.run} (a test keeps the two in sync). When screening is inactive
+ * (screenTrials 0 or ≥ searchTrials, screenKeep 0, or candidates ≤ screenKeep) every candidate is
+ * confirmed directly: cost = candidates. Progress estimators use this so their denominators don't
+ * undershoot the ladder's extra rungs and wider-than-screenKeep confirms (which pins the ETA at ~0s).
+ */
+export function ladderEvalCount(
+    candidates: number,
+    screenTrials: number,
+    searchTrials: number,
+    screenKeep: number
+): number {
+    if (screenTrials <= 0 || screenTrials >= searchTrials || screenKeep <= 0 || candidates <= screenKeep) {
+        return Math.max(0, candidates);
+    }
+    let evals = 0;
+    let survivors = candidates;
+    let rungTrials = screenTrials;
+    while (true) {
+        evals += survivors;
+        survivors = Math.max(screenKeep, Math.ceil(survivors / 3));
+        if (survivors <= screenKeep || 3 * rungTrials >= searchTrials) {
+            break;
+        }
+        rungTrials = Math.min(3 * rungTrials, searchTrials);
+    }
+    // The survivors are confirmed at full searchTrials.
+    return evals + survivors;
+}
+
 /** Internal comparable score. Higher is better, with feasibility taking precedence. */
 interface Score {
     feasible: boolean;

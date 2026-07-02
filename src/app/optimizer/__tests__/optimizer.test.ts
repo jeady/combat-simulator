@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
+import { CoordinateAscentOptimizer, ladderEvalCount } from 'src/app/optimizer/optimizer';
 import { equipmentDimensions } from 'src/app/optimizer/dimensions';
 import { OptimizeEvent, OptimizeProgress, OptimizeResult, OptimizeTarget } from 'src/app/optimizer/types';
 import {
@@ -810,6 +810,20 @@ describe('CoordinateAscentOptimizer', () => {
             expect(scorer.trialsSeen.filter(t => t === 200).length).toBe(4);
             expect(scorer.evaluations).toBe(49);
             expect(scorer.trialsSeen).toContain(500); // final re-score fidelity
+        });
+
+        it('ladderEvalCount mirrors the ladder accounting exactly (keeps estimators in sync)', () => {
+            // The 30-candidate run above: 30 + 10 + 4 rung evals + 3 confirms = 47 per-dimension evals
+            // (the run's 49 total is 47 + baseline + finalize).
+            expect(ladderEvalCount(30, 10, 200, 3)).toBe(30 + 10 + 4 + 3);
+            // Single-rung collapse (3·screenTrials >= searchTrials): one rung, then confirm the
+            // max(screenKeep, ceil(k/3)) survivors — wider than screenKeep for big k.
+            expect(ladderEvalCount(150, 50, 200, 3)).toBe(150 + 50 + 17);
+            // Screening inactive: too few candidates, screening off, or screen at/above full fidelity.
+            expect(ladderEvalCount(3, 10, 200, 3)).toBe(3);
+            expect(ladderEvalCount(30, 0, 200, 3)).toBe(30);
+            expect(ladderEvalCount(30, 200, 200, 3)).toBe(30);
+            expect(ladderEvalCount(0, 10, 200, 3)).toBe(0);
         });
 
         it('skips the ladder entirely when candidates <= screenKeep', async () => {

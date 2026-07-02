@@ -3,7 +3,7 @@ import { LoadTemplate } from 'src/app/user-interface/template';
 import { Global } from 'src/app/global';
 import { PageController, PageId } from 'src/app/user-interface/pages/page-controller';
 import { Settings, SettingsController } from 'src/app/settings-controller';
-import { CoordinateAscentOptimizer } from 'src/app/optimizer/optimizer';
+import { CoordinateAscentOptimizer, ladderEvalCount } from 'src/app/optimizer/optimizer';
 import { multiStart, MultiStartProgress, Seed } from 'src/app/optimizer/multistart';
 import { MemoizingScorer, stableStringify } from 'src/app/optimizer/cache';
 import { WorkerPool } from 'src/app/optimizer/worker-pool';
@@ -161,6 +161,9 @@ export class AutoOptimizePage extends HTMLElement {
     private _runTarget?: OptimizeTarget;
     /** The active run's full search fidelity; leaderboard entries below this are screening noise. */
     private _runSearchTrials = 0;
+    /** The active run's screening parameters, so _estimateEvals can mirror the real ladder cost. */
+    private _runScreenTrials = 0;
+    private _runScreenKeep = 3;
     /**
      * Evaluations completed by FINISHED inner runs (earlier restart seeds, the gear search before the
      * staged progression pass). Each inner optimizer.run restarts its own counter from zero, so every
@@ -434,6 +437,11 @@ export class AutoOptimizePage extends HTMLElement {
         this._cancel = cancel;
         this._runTarget = target;
         this._runSearchTrials = searchTrials;
+        // Fast search: screen every candidate at a quarter of the search trials, then race the
+        // survivors up the rung ladder. Captured as fields so runOptions and _estimateEvals use the
+        // SAME values — the estimate mirrors the ladder's exact eval accounting (ladderEvalCount).
+        this._runScreenTrials = fastSearch ? Math.max(10, Math.floor(searchTrials / 4)) : 0;
+        this._runScreenKeep = 3;
         this._refreshObjective();
         this._result = undefined;
         this._apply.disabled = true;
@@ -521,11 +529,10 @@ export class AutoOptimizePage extends HTMLElement {
             searchTicks: Math.max(Global.stores.optimizer.state.searchTicks, sim.ticks),
             finalTrials: sim.trials,
             finalTicks: sim.ticks,
-            // Fast search: screen every candidate at a quarter of the search trials, then confirm only
-            // the best few at full trials. The optimizer skips the screen pass automatically for slots
-            // that have ≤ screenKeep candidates (no benefit there).
-            screenTrials: fastSearch ? Math.max(10, Math.floor(searchTrials / 4)) : 0,
-            screenKeep: 3
+            // Fast search screening (see the field capture at run start). The optimizer skips the
+            // screen pass automatically for slots that have ≤ screenKeep candidates (no benefit there).
+            screenTrials: this._runScreenTrials,
+            screenKeep: this._runScreenKeep
         };
 
         try {
@@ -938,7 +945,10 @@ export class AutoOptimizePage extends HTMLElement {
         // to the sims actually done on each boundary.
         if (progress.pass > this._lastPass) {
             this._lastPass = progress.pass;
-            const remainingPasses = Math.max(0, this._maxPasses - progress.pass);
+            // The boundary fires on the FIRST event of the new pass, so that pass still has to run —
+            // include it in the remaining budget (maxPasses - pass + 1). Budgeting only the passes
+            // after it left the final pass with a zero-remaining denominator (ETA pinned at ~0s).
+            const remainingPasses = Math.max(0, this._maxPasses - progress.pass + 1);
             this._estimatedEvals = Math.max(
                 1,
                 totalEvals + remainingPasses * this._perPassEvals + this._seedsRemaining * this._perSeedEvals
@@ -1028,23 +1038,18 @@ export class AutoOptimizePage extends HTMLElement {
     }
 
     /**
-     * Rough upfront estimate of total evaluations: candidates per (searchable) dimension × max passes,
-     * plus the baseline + final re-score. This is only a starting denominator for the bar/ETA and is
-     * wrong in both directions — early convergence and cache hits run fewer passes, while the estimate
-     * ignores confirm-swap re-scores — so the bar is capped short of 100% until the run reports done,
-     * and the per-pass figure is kept so a finished pass can rescale the denominator (see _renderProgress).
-     * Records `_perPassEvals`/`_maxPasses` and resets the pass tracker as a side effect.
+     * Rough upfront estimate of total evaluations: per-dimension ladder cost (ladderEvalCount — the
+     * exact screening-rung + confirm accounting the optimizer runs) × max passes, plus the baseline +
+     * final re-score. Still only a starting denominator for the bar/ETA — early convergence and cache
+     * hits run fewer passes, and confirm-swap replicates aren't counted — so the bar is capped short
+     * of 100% until the run reports done, and the per-pass figure is kept so a finished pass can
+     * rescale the denominator (see _renderProgress). Records `_perPassEvals`/`_maxPasses` and resets
+     * the pass tracker as a side effect.
      */
     private _estimateEvals(): number {
-        // With fast search, a slot that has more than screenKeep candidates pays a screen eval for
-        // each candidate plus a confirm eval for the screenKeep survivors — so count both, otherwise
-        // the progress bar races ahead and then stalls once the confirm passes run.
-        const fastSearch = Global.stores.optimizer.state.fastSearch;
-        const screenKeep = 3;
         const perPass = this._runDims.reduce((sum, dim) => {
             const candidates = Math.max(0, dim.getCandidates().length - 1);
-            const withConfirm = fastSearch && candidates > screenKeep ? candidates + screenKeep : candidates;
-            return sum + withConfirm;
+            return sum + ladderEvalCount(candidates, this._runScreenTrials, this._runSearchTrials, this._runScreenKeep);
         }, 0);
         this._perPassEvals = Math.max(1, perPass);
         this._maxPasses = DEFAULT_OPTIONS.maxPasses;
@@ -1067,12 +1072,14 @@ export class AutoOptimizePage extends HTMLElement {
         }
 
         const elapsed = Date.now() - this._startTime;
-        if (evaluations > 0 && elapsed > 0) {
+        if (evaluations > 0 && elapsed > 0 && evaluations < this._estimatedEvals) {
             const perEval = elapsed / evaluations;
-            const remaining = Math.max(0, this._estimatedEvals - evaluations) * perEval;
+            const remaining = (this._estimatedEvals - evaluations) * perEval;
             // The time is a rough guess off an unreliable total, so label it `~` (see _formatEta).
             this._progressEta.textContent = `~${this._formatEta(remaining)}`;
         } else {
+            // Nothing measured yet, or the estimate is exhausted while the run continues — show no
+            // time rather than a confidently wrong "~0s".
             this._progressEta.textContent = '';
         }
     }
