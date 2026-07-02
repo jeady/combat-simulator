@@ -2,7 +2,8 @@
  * Contract tests for the game-backed optimizer adapters (`adapters.ts`). `adapters.ts` is the only
  * optimizer module allowed to touch `Global.*`, and full fidelity needs the running game — but the
  * PURE logic inside the adapter functions (candidate filtering, dominance pruning direction, summon
- * synergy shaping, slayer-task detection, consumable candidate shaping) can be exercised headless by
+ * synergy shaping, slayer-task / dungeon-aggregate target detection, consumable candidate shaping)
+ * can be exercised headless by
  * stubbing `Global` and `Lookup` with in-memory fakes.
  *
  * The mocks live ONLY in this test file (via vi.mock) — `adapters.ts` itself stays untouched, so the
@@ -40,12 +41,27 @@ vi.mock('src/app/global', () => ({
 }));
 
 const isSlayerTaskMock = vi.hoisted(() => vi.fn((id: string | undefined) => false));
-vi.mock('src/shared/utils/lookup', () => ({ Lookup: { isSlayerTask: isSlayerTaskMock } }));
+const isDungeonMock = vi.hoisted(() => vi.fn((id: string | undefined) => false));
+const isStrongholdMock = vi.hoisted(() => vi.fn((id: string | undefined) => false));
+const isDepthMock = vi.hoisted(() => vi.fn((id: string | undefined) => false));
+const getMonsterListMock = vi.hoisted(() => vi.fn((id: string): { id: string }[] => []));
+const getMonsterByIdMock = vi.hoisted(() => vi.fn((id: string): { id: string } | undefined => undefined));
+vi.mock('src/shared/utils/lookup', () => ({
+    Lookup: {
+        isSlayerTask: isSlayerTaskMock,
+        isDungeon: isDungeonMock,
+        isStronghold: isStrongholdMock,
+        isDepth: isDepthMock,
+        getMonsterList: getMonsterListMock,
+        monsters: { getObjectByID: getMonsterByIdMock }
+    }
+}));
 
 import {
     GameCandidateProvider,
     GameLoadoutApplier,
     slayerTaskTargetId,
+    dungeonTargetId,
     isSupportedTarget,
     summonSynergyDimension
 } from 'src/app/optimizer/adapters';
@@ -169,6 +185,16 @@ function setGame(built: ReturnType<typeof buildGame>) {
 beforeEach(() => {
     isSlayerTaskMock.mockReset();
     isSlayerTaskMock.mockReturnValue(false);
+    isDungeonMock.mockReset();
+    isDungeonMock.mockReturnValue(false);
+    isStrongholdMock.mockReset();
+    isStrongholdMock.mockReturnValue(false);
+    isDepthMock.mockReset();
+    isDepthMock.mockReturnValue(false);
+    getMonsterListMock.mockReset();
+    getMonsterListMock.mockReturnValue([]);
+    getMonsterByIdMock.mockReset();
+    getMonsterByIdMock.mockReturnValue(undefined);
     state.game = undefined;
     state.melvor = undefined;
     state.simulation = undefined;
@@ -540,6 +566,62 @@ describe('slayerTaskTargetId / isSupportedTarget', () => {
         // No reachable task monster => unsupported (nothing to score).
         state.simulation = { getAccessibleSlayerTaskMonsters: (): { id: string }[] => [] };
         expect(isSupportedTarget({ monsterId: 'task:A' })).toBe(false);
+    });
+});
+
+/**
+ * Scope item 3b — dungeonTargetId / aggregate isSupportedTarget branches. The Lookup area checks
+ * (isDungeon/isStronghold/isDepth), monster registry, and getMonsterList are stubbed so every
+ * resolution branch runs without the game. The load-bearing cases: an area id arriving in
+ * `monsterId` (the dungeon-level chart bar selected without inspecting — previously fell through to
+ * the plain-monster path and failed every sim), and a real monster fought IN a dungeon context
+ * (inspect selection) staying a single-monster target rather than being hijacked as an aggregate.
+ */
+describe('dungeonTargetId / aggregate isSupportedTarget', () => {
+    it('returns undefined for no target and for a plain monster', () => {
+        expect(dungeonTargetId(undefined)).toBeUndefined();
+        expect(dungeonTargetId({ monsterId: 'melvorD:Rat' })).toBeUndefined();
+    });
+
+    it('detects a dungeon id carried in monsterId (aggregate bar selected without inspecting)', () => {
+        isDungeonMock.mockImplementation(id => id === 'dung:A');
+        expect(dungeonTargetId({ monsterId: 'dung:A' })).toBe('dung:A');
+    });
+
+    it('detects stronghold and abyss-depth ids the same way', () => {
+        isStrongholdMock.mockImplementation(id => id === 'stronghold:A');
+        isDepthMock.mockImplementation(id => id === 'depth:A');
+        expect(dungeonTargetId({ monsterId: 'stronghold:A' })).toBe('stronghold:A');
+        expect(dungeonTargetId({ monsterId: 'depth:A' })).toBe('depth:A');
+    });
+
+    it('does NOT hijack a real monster fought in a dungeon context (inspect selection)', () => {
+        isDungeonMock.mockImplementation(id => id === 'dung:A');
+        getMonsterByIdMock.mockImplementation(id => (id === 'melvorD:Boss' ? { id } : undefined));
+        // { monsterId: <monster>, entityId: <dungeon> } is the supported single-fight sim.
+        expect(dungeonTargetId({ monsterId: 'melvorD:Boss', entityId: 'dung:A' })).toBeUndefined();
+    });
+
+    it('falls back to an aggregate entityId when monsterId does not resolve to a real monster', () => {
+        isDungeonMock.mockImplementation(id => id === 'dung:A');
+        getMonsterByIdMock.mockReturnValue(undefined);
+        expect(dungeonTargetId({ monsterId: 'not-a-monster', entityId: 'dung:A' })).toBe('dung:A');
+    });
+
+    it('isSupportedTarget for an aggregate is true iff the area has simmable monsters', () => {
+        isDungeonMock.mockImplementation(id => id === 'dung:A');
+
+        getMonsterListMock.mockReturnValue([{ id: 'melvorD:Boss' }]);
+        expect(isSupportedTarget({ monsterId: 'dung:A' })).toBe(true);
+
+        // No monsters in the area => nothing to score => unsupported (rejected up front by the UI).
+        getMonsterListMock.mockReturnValue([]);
+        expect(isSupportedTarget({ monsterId: 'dung:A' })).toBe(false);
+    });
+
+    it('a slayer-task target is never treated as a dungeon aggregate', () => {
+        isSlayerTaskMock.mockImplementation(id => id === 'task:A');
+        expect(dungeonTargetId({ monsterId: 'task:A' })).toBeUndefined();
     });
 });
 

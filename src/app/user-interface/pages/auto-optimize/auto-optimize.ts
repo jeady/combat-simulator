@@ -17,6 +17,7 @@ import {
     GameLoadoutApplier,
     GameScorer,
     buildDimensions,
+    dungeonTargetId,
     getSelectedTarget,
     isSupportedObjective,
     isSupportedTarget,
@@ -299,13 +300,21 @@ export class AutoOptimizePage extends HTMLElement {
             }
             ${
                 target && !targetSupported
-                    ? `<div class="mcs-auto-optimize-warn">You can't reach any monster in this slayer task with your current setup, so there's nothing to optimize. Pick a different task or target on the Simulate page.</div>`
+                    ? `<div class="mcs-auto-optimize-warn">${this._unsupportedTargetMessage(target)}</div>`
                     : ''
             }
         `;
     }
 
-    /** Human-readable name for the selected target — a monster, or a named slayer-task tier. */
+    /** Why the selected target can't be optimized — matches the isSupportedTarget rejection. */
+    private _unsupportedTargetMessage(target: OptimizeTarget | undefined): string {
+        if (slayerTaskTargetId(target)) {
+            return "You can't reach any monster in this slayer task with your current setup, so there's nothing to optimize. Pick a different task or target on the Simulate page.";
+        }
+        return "This target has no monsters the simulator can fight, so there's nothing to optimize. Pick a different target on the Simulate page.";
+    }
+
+    /** Human-readable name for the selected target — a monster, a dungeon/area, or a slayer-task tier. */
     private _targetName(target: OptimizeTarget | undefined): string {
         if (!target) {
             return 'None selected';
@@ -313,6 +322,11 @@ export class AutoOptimizePage extends HTMLElement {
         const taskId = slayerTaskTargetId(target);
         if (taskId) {
             return `${Lookup.tasks.getObjectByID(taskId)?.name ?? taskId} (slayer task)`;
+        }
+        const dungeonId = dungeonTargetId(target);
+        if (dungeonId) {
+            const kind = Lookup.isDungeon(dungeonId) ? 'dungeon' : Lookup.isStronghold(dungeonId) ? 'stronghold' : 'abyss depth';
+            return `${(Lookup.getEntity(dungeonId) as { name?: string } | undefined)?.name ?? dungeonId} (${kind})`;
         }
         return Global.game.monsters.getObjectByID(target.monsterId)?.name ?? target.monsterId;
     }
@@ -381,8 +395,7 @@ export class AutoOptimizePage extends HTMLElement {
         }
 
         if (!isSupportedTarget(target)) {
-            this._status.textContent =
-                "You can't reach any monster in this slayer task with your current setup, so there's nothing to optimize. Pick a different task or target on the Simulate page.";
+            this._status.textContent = this._unsupportedTargetMessage(target);
             return;
         }
 

@@ -100,11 +100,42 @@ export function slayerTaskTargetId(target: OptimizeTarget | undefined): string |
     return undefined;
 }
 
+/** A dungeon / stronghold / abyss-depth id — the aggregate combat areas the Simulate chart averages. */
+function isAggregateAreaId(id: string | undefined): boolean {
+    return Lookup.isDungeon(id) || Lookup.isStronghold(id) || Lookup.isDepth(id);
+}
+
+/**
+ * The dungeon/stronghold/abyss-depth id an AGGREGATE target refers to, or undefined. Like a slayer
+ * task, the area id can arrive in `monsterId`: selecting the dungeon-level bar on the Simulate page
+ * (without inspecting) puts the DUNGEON id into `bars.monsterIds`, so {@link getSelectedTarget}
+ * returns `{ monsterId: <dungeonId> }` — an area id is never a monster id, so that's unambiguous.
+ * UNLIKE slayerTaskTargetId, an area id in `entityId` does NOT by itself mark an aggregate target:
+ * inspecting a dungeon and picking a monster bar yields `{ monsterId: <monster>, entityId:
+ * <dungeonId> }`, which is the already-supported single-fight-in-dungeon-context sim and must stay
+ * one. Only when `monsterId` doesn't resolve to a real monster does `entityId` decide (defensive —
+ * getSelectedTarget shouldn't produce that shape today).
+ */
+export function dungeonTargetId(target: OptimizeTarget | undefined): string | undefined {
+    if (!target) {
+        return undefined;
+    }
+    if (isAggregateAreaId(target.monsterId)) {
+        return target.monsterId;
+    }
+    if (isAggregateAreaId(target.entityId) && !Lookup.monsters.getObjectByID(target.monsterId)) {
+        return target.entityId;
+    }
+    return undefined;
+}
+
 /**
  * A slayer-task category (e.g. an "Auto Slayer" tier) isn't a single simulatable combat area: the
  * Simulate page sims each accessible task monster individually (entityId undefined) and averages
  * them. {@link GameScorer.evaluate} replicates that, so slayer tasks ARE supported — provided the
  * character can reach at least one monster in the task (otherwise there is nothing to score).
+ * A dungeon/stronghold/abyss-depth aggregate is scored the same way (each monster simmed in the
+ * area's context, then averaged), so it's supported whenever the area actually has monsters.
  */
 export function isSupportedTarget(target: OptimizeTarget | undefined): boolean {
     if (!target) {
@@ -113,6 +144,10 @@ export function isSupportedTarget(target: OptimizeTarget | undefined): boolean {
     const taskId = slayerTaskTargetId(target);
     if (taskId) {
         return Global.simulation.getAccessibleSlayerTaskMonsters(taskId).length > 0;
+    }
+    const dungeonId = dungeonTargetId(target);
+    if (dungeonId) {
+        return Lookup.getMonsterList(dungeonId).length > 0;
     }
     return true;
 }
@@ -178,6 +213,13 @@ export class GameScorer implements Scorer {
             return this.evaluateSlayerTask(taskId, trials, ticks, deathAbortThreshold);
         }
 
+        // Likewise a dungeon/stronghold/abyss-depth aggregate: sim each of the area's monsters in
+        // the area's context and average them, the same math behind the chart's dungeon-level bar.
+        const dungeonId = dungeonTargetId(target);
+        if (dungeonId) {
+            return this.evaluateDungeon(dungeonId, trials, ticks, deathAbortThreshold);
+        }
+
         const batches = this.resolveBatches(trials);
         const datas = await this.runSim(target.monsterId, target.entityId, trials, ticks, deathAbortThreshold, batches);
         if (!datas) {
@@ -215,10 +257,9 @@ export class GameScorer implements Scorer {
     }
 
     /**
-     * Score a slayer-task target: sim every accessible task monster individually, then fold the
-     * results into one averaged {@link SimulationData} via {@link Simulation.averageMonsterData} —
-     * the same math the Simulate chart uses — and read the plotted metric off it. Monsters whose
-     * sim failed are kept as `simSuccess:false` entries so the averager skips them.
+     * Score a slayer-task target: sim every accessible task monster individually (entityId
+     * undefined => the worker fights the plain monster, exactly as the Simulate queue does), then
+     * average — see {@link evaluateAggregate}.
      */
     private async evaluateSlayerTask(
         taskId: string,
@@ -227,25 +268,67 @@ export class GameScorer implements Scorer {
         deathAbortThreshold?: number
     ): Promise<Evaluation> {
         const monsters = Global.simulation.getAccessibleSlayerTaskMonsters(taskId);
+        return this.evaluateAggregate('slayer-task', taskId, monsters, undefined, true, trials, ticks, deathAbortThreshold);
+    }
+
+    /**
+     * Score a dungeon/stronghold/abyss-depth target: sim each of the area's monsters IN the area's
+     * context (entityId = the area id, matching the chart's `simId(monster.id, areaId)` sims), then
+     * average — see {@link evaluateAggregate}. A per-monster average is an approximation of a real
+     * dungeon run: each fight sims fresh, so HP/food state does NOT carry over between fights. The
+     * Simulate chart's dungeon bar makes exactly the same approximation.
+     */
+    private async evaluateDungeon(
+        dungeonId: string,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ): Promise<Evaluation> {
+        const monsters = Lookup.getMonsterList(dungeonId);
+        return this.evaluateAggregate('dungeon', dungeonId, monsters, dungeonId, false, trials, ticks, deathAbortThreshold);
+    }
+
+    /**
+     * Shared aggregate scorer behind {@link evaluateSlayerTask} and {@link evaluateDungeon}: sim
+     * each monster of the aggregate individually (against `simEntityId` — undefined for a task's
+     * plain-monster fights, the area id for a dungeon's in-context fights), then fold the results
+     * into one averaged {@link SimulationData} via {@link Simulation.averageMonsterData} — the same
+     * math the Simulate chart uses — and read the plotted metric off it. Monsters whose sim failed
+     * are kept as `simSuccess:false` entries so the averager skips them.
+     */
+    private async evaluateAggregate(
+        kind: 'slayer-task' | 'dungeon',
+        entityId: string,
+        monsters: Monster[],
+        simEntityId: string | undefined,
+        isSlayerTask: boolean,
+        trials: number,
+        ticks: number,
+        deathAbortThreshold?: number
+    ): Promise<Evaluation> {
         if (monsters.length === 0) {
-            Global.logger.warn('Optimizer slayer-task sim: no reachable monsters', { taskId });
+            Global.logger.warn(`Optimizer ${kind} sim: no simmable monsters`, { entityId });
             return { metric: NaN, deathRate: Infinity, success: false };
         }
 
+        // A dungeon's monster list repeats a monster once per fight; sim each DISTINCT monster once
+        // (the Simulate queue does the same via its inQueue guard) and let the averager weight it by
+        // occurrence. Task lists are already distinct, so this is a no-op there.
+        const uniqueMonsters = [...new Map(monsters.map(monster => [monster.id, monster])).values()];
+
         const dataByMonster = new Map<string, SimulationData>();
         let anySuccess = false;
-        // entityId undefined => the worker fights the plain monster, exactly as the Simulate queue does.
-        // Slayer-task scoring already sims many monsters, so it isn't batched (batches=1): the
+        // Aggregate scoring already sims many monsters, so it isn't batched (batches=1): the
         // significance gate simply falls back to the fixed minImprovement margin here.
         if (this.pool) {
-            // The setup is identical for every task monster, so the (heavy) save decode is done once and
-            // each monster becomes one request the pool sims concurrently — an ~N-monster speedup with the
-            // pool that was otherwise idle on this path. Per-request failures are captured, not fatal.
+            // The setup is identical for every monster, so the (heavy) save decode is done once and
+            // each monster becomes one request the pool sims concurrently — an ~N-monster speedup with
+            // the pool that was otherwise idle on this path. Per-request failures are captured, not fatal.
             const saveString = Global.game.generateSaveStringSimple();
-            const requests: SimulateRequest[] = monsters.map(monster => ({
+            const requests: SimulateRequest[] = uniqueMonsters.map(monster => ({
                 saveString,
                 monsterId: monster.id,
-                entityId: undefined as unknown as string,
+                entityId: simEntityId as string,
                 trials,
                 maxTicks: ticks,
                 deathAbortThreshold,
@@ -253,9 +336,9 @@ export class GameScorer implements Scorer {
             }));
             const settled = await this.pool.simulateManySettled(requests);
             settled.forEach((result, i) => {
-                const monster = monsters[i];
+                const monster = uniqueMonsters[i];
                 const datas = result.ok
-                    ? this.responseToDatas(result.value, monster.id, undefined, trials, ticks)
+                    ? this.responseToDatas(result.value, monster.id, simEntityId, trials, ticks)
                     : undefined;
                 const data = datas?.[0];
                 if (data) {
@@ -264,8 +347,8 @@ export class GameScorer implements Scorer {
                 dataByMonster.set(monster.id, data ?? Global.simulation.newSimDataEntry(true));
             });
         } else {
-            for (const monster of monsters) {
-                const datas = await this.runSim(monster.id, undefined, trials, ticks, deathAbortThreshold);
+            for (const monster of uniqueMonsters) {
+                const datas = await this.runSim(monster.id, simEntityId, trials, ticks, deathAbortThreshold);
                 const data = datas?.[0];
                 if (data) {
                     anySuccess = true;
@@ -275,9 +358,9 @@ export class GameScorer implements Scorer {
         }
 
         if (!anySuccess) {
-            Global.logger.warn('Optimizer slayer-task sim: every task monster failed', {
-                taskId,
-                monsters: monsters.length
+            Global.logger.warn(`Optimizer ${kind} sim: every monster failed`, {
+                entityId,
+                monsters: uniqueMonsters.length
             });
             return { metric: NaN, deathRate: Infinity, success: false };
         }
@@ -286,8 +369,8 @@ export class GameScorer implements Scorer {
         Global.simulation.averageMonsterData(
             averageData,
             monsters,
-            true,
-            taskId,
+            isSlayerTask,
+            entityId,
             monster => dataByMonster.get(monster.id) as SimulationData
         );
 
@@ -384,8 +467,10 @@ export class GameScorer implements Scorer {
      * Results are folded exactly like {@link evaluate}, so a candidate scores identically whether it
      * ran serially or in a batch. Bound to {@link evaluateBatch} only when a pool is present.
      *
-     * Slayer-task targets aren't single-entity sims (they average many monsters), so they fall back
-     * to serial evaluation here — the parallelism win is on the common single-monster case.
+     * Aggregate targets (slayer tasks, dungeons/strongholds/depths) aren't single-entity sims (they
+     * average many monsters), so they fall back to serial evaluation here — where each candidate's
+     * per-monster sims still fan out across the pool. The parallelism win of THIS path is on the
+     * common single-monster case.
      */
     private async runBatch(
         setups: unknown[],
@@ -394,7 +479,7 @@ export class GameScorer implements Scorer {
         ticks: number,
         deathAbortThreshold?: number
     ): Promise<Evaluation[]> {
-        if (!this.pool || slayerTaskTargetId(target)) {
+        if (!this.pool || slayerTaskTargetId(target) || dungeonTargetId(target)) {
             const out: Evaluation[] = [];
             for (const setup of setups) {
                 SettingsController.import(setup as Settings);
