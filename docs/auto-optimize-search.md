@@ -258,10 +258,13 @@ Four composing guards (all landed in Wave 1, tracked here as the section `types.
   unbiased score, not the lucky sample. Costs exactly one extra evaluation per accepted improving
   swap. This removes the max-of-N selection bias that the significance band alone can't.
 
-**Slayer-task caveat:** slayer-task scoring already sims MANY monsters and averages them
-(`evaluateSlayerTask`), so it isn't batched (`batches = 1`) and supplies **no `stdError`**. The
-significance gate is therefore inert on the slayer path — it falls back to the fixed/relative
-`minImprovement` margins there.
+**Slayer-task/dungeon aggregates:** with a worker pool, `evaluateAggregate` batches each monster's
+trials into sub-runs and folds batch *j* across all monsters into one independent aggregate sample —
+so these targets DO supply a batch-means `stdError` and the significance gate applies. Historical
+caveat: this path originally ran unbatched (no `stdError`, gate inert), which let metric-plateau
+slots swap on pure noise; the pool-less serial path still behaves that way and falls back to the
+fixed/relative `minImprovement` margins (the UI sets `minRelImprovement: 0.01` for these targets as
+a backstop).
 
 ---
 
