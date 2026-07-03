@@ -370,14 +370,15 @@ export class GameScorer implements Scorer {
         // occurrence. Task lists are already distinct, so this is a no-op there.
         const uniqueMonsters = [...new Map(monsters.map(monster => [monster.id, monster])).values()];
 
-        const dataByMonster = new Map<string, SimulationData>();
-        let anySuccess = false;
-        // Aggregate scoring already sims many monsters, so it isn't batched (batches=1): the
-        // significance gate simply falls back to the fixed minImprovement margin here.
         if (this.pool) {
             // The setup is identical for every monster, so the (heavy) save decode is done once and
-            // each monster becomes one request the pool sims concurrently — an ~N-monster speedup with
-            // the pool that was otherwise idle on this path. Per-request failures are captured, not fatal.
+            // each monster becomes one request the pool sims concurrently. Each request is split into
+            // batch-means sub-runs (exactly like single-monster scoring): folding batch j across all
+            // monsters yields one independent aggregate sample, and the spread of those samples is
+            // the stdError the significance gate needs. This path used to run UNBATCHED, leaving the
+            // z-gate inert for slayer/dungeon targets — metric-plateau slots then swapped on pure
+            // noise (any lucky delta cleared the margin-0/relative-floor accept test).
+            const batches = this.resolveBatches(trials);
             const saveString = Global.game.generateSaveStringSimple();
             const requests: SimulateRequest[] = uniqueMonsters.map(monster => ({
                 saveString,
@@ -386,29 +387,84 @@ export class GameScorer implements Scorer {
                 trials,
                 maxTicks: ticks,
                 deathAbortThreshold,
-                batches: undefined
+                batches: batches > 1 ? batches : undefined
             }));
             const settled = await this.pool.simulateManySettled(requests);
-            settled.forEach((result, i) => {
-                const monster = uniqueMonsters[i];
-                const datas = result.ok
-                    ? this.responseToDatas(result.value, monster.id, simEntityId, trials, ticks)
-                    : undefined;
-                const data = datas?.[0];
-                if (data) {
-                    anySuccess = true;
-                }
-                dataByMonster.set(monster.id, data ?? Global.simulation.newSimDataEntry(true));
-            });
-        } else {
-            for (const monster of uniqueMonsters) {
-                const datas = await this.runSim(monster.id, simEntityId, trials, ticks, deathAbortThreshold);
-                const data = datas?.[0];
-                if (data) {
-                    anySuccess = true;
-                }
-                dataByMonster.set(monster.id, data ?? Global.simulation.newSimDataEntry(true));
+            // Per-monster successful sub-run datas (order preserved); [] when the request failed.
+            const datasByMonster = settled.map(
+                (result, i) =>
+                    (result.ok
+                        ? this.responseToDatas(result.value, uniqueMonsters[i].id, simEntityId, trials, ticks)
+                        : undefined) ?? []
+            );
+            if (!datasByMonster.some(datas => datas.length > 0)) {
+                Global.logger.warn(`Optimizer ${kind} sim: every monster failed`, {
+                    entityId,
+                    monsters: uniqueMonsters.length
+                });
+                return { metric: NaN, deathRate: Infinity, success: false };
             }
+
+            // One aggregate sample per batch index. Sub-runs are iid, so a monster that returned
+            // fewer successful sub-runs than requested recycles what it has (slightly understating
+            // variance) instead of sinking the whole batch; a monster with none contributes a
+            // skipped placeholder, exactly as in the serial path.
+            const samples: { metric: number; deathRate: number; worstHit: number }[] = [];
+            for (let b = 0; b < batches; b++) {
+                const byId = new Map<string, SimulationData>();
+                uniqueMonsters.forEach((monster, i) => {
+                    const datas = datasByMonster[i];
+                    byId.set(
+                        monster.id,
+                        datas.length ? datas[b % datas.length] : Global.simulation.newSimDataEntry(true)
+                    );
+                });
+                const averageData = Global.simulation.newSimDataEntry(false);
+                Global.simulation.averageMonsterData(
+                    averageData,
+                    monsters,
+                    isSlayerTask,
+                    entityId,
+                    monster => byId.get(monster.id) as SimulationData
+                );
+                const metric = Global.simulation.getBarValue(true, averageData);
+                if (Number.isFinite(metric)) {
+                    samples.push({
+                        metric,
+                        deathRate: averageData.deathRate ?? 0,
+                        worstHit: averageData.highestDamageTaken ?? 0
+                    });
+                }
+            }
+            if (samples.length === 0) {
+                return { metric: NaN, deathRate: Infinity, success: false };
+            }
+            const deathRate = samples.reduce((sum, sample) => sum + sample.deathRate, 0) / samples.length;
+            const highestDamageTaken = Math.max(...samples.map(sample => sample.worstHit));
+            if (samples.length < 2) {
+                return { metric: samples[0].metric, deathRate, success: true, highestDamageTaken };
+            }
+            const { mean, stdError } = meanStdError(samples.map(sample => sample.metric));
+            return {
+                metric: mean,
+                deathRate,
+                success: true,
+                stdError: Number.isFinite(stdError) ? stdError : undefined,
+                highestDamageTaken
+            };
+        }
+
+        // Pool-less path: one serial full-trial sim per monster (no batching, so no stdError — the
+        // accept test falls back to the minImprovement/minRelImprovement margins).
+        const dataByMonster = new Map<string, SimulationData>();
+        let anySuccess = false;
+        for (const monster of uniqueMonsters) {
+            const datas = await this.runSim(monster.id, simEntityId, trials, ticks, deathAbortThreshold);
+            const data = datas?.[0];
+            if (data) {
+                anySuccess = true;
+            }
+            dataByMonster.set(monster.id, data ?? Global.simulation.newSimDataEntry(true));
         }
 
         if (!anySuccess) {
