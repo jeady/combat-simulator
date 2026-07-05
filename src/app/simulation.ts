@@ -28,6 +28,7 @@ export interface SimulationData extends SimulationStats, SimulationResult {
 interface Queue {
     monsterId: string;
     entityId: string;
+    onTask: boolean;
 }
 
 type Callback = (current: number, total: number) => void;
@@ -56,6 +57,13 @@ export class Simulation {
     private current = 0;
     private queue: Queue[] = [];
     private error?: string;
+
+    /**
+     * The user's chosen "On Slayer Task" toggle value, captured before a run starts.
+     * The dispatch loop mutates `player.isSlayerTask` per queue item, so we restore
+     * this value once the run finishes (or is cancelled) to keep the UI switch accurate.
+     */
+    private userIsSlayerTask = false;
 
     private queueCallbacks = new Set<Callback>();
 
@@ -433,7 +441,7 @@ export class Simulation {
                 }
 
                 for (const monster of monsters) {
-                    this.pushMonsterToQueue(monster.id, Global.stores.plotter.state.inspectedId);
+                    this.pushMonsterToQueue(monster.id, Global.stores.plotter.state.inspectedId, false);
                 }
             } else {
                 const task = Lookup.tasks.allObjects.find(task => task.id == Global.stores.plotter.state.inspectedId);
@@ -501,7 +509,7 @@ export class Simulation {
             if (this.dungeonSimFilter[dungeon.id]) {
                 for (let j = 0; j < dungeon.monsters.length; j++) {
                     const monster = dungeon.monsters[j];
-                    this.pushMonsterToQueue(monster.id, dungeon.id);
+                    this.pushMonsterToQueue(monster.id, dungeon.id, false);
                 }
             }
         }
@@ -515,7 +523,7 @@ export class Simulation {
 
                 for (let j = 0; j < stronghold.monsters.length; j++) {
                     const monster = stronghold.monsters[j];
-                    this.pushMonsterToQueue(monster.id, stronghold.id);
+                    this.pushMonsterToQueue(monster.id, stronghold.id, false);
                 }
             }
         }
@@ -525,7 +533,7 @@ export class Simulation {
             if (this.depthSimFilter[depth.id]) {
                 for (let j = 0; j < depth.monsters.length; j++) {
                     const monster = depth.monsters[j];
-                    this.pushMonsterToQueue(monster.id, depth.id);
+                    this.pushMonsterToQueue(monster.id, depth.id, false);
                 }
             }
         }
@@ -702,12 +710,12 @@ export class Simulation {
                         Global.stores.plotter.barIsStrongholdMonster(Global.stores.plotter.state.selectedBar) ||
                         Global.stores.plotter.barIsDepthMonster(Global.stores.plotter.state.selectedBar))
                 ) {
-                    this.pushMonsterToQueue(Global.stores.plotter.selectedMonsterId, entityId);
+                    this.pushMonsterToQueue(Global.stores.plotter.selectedMonsterId, entityId, false);
                     return true;
                 }
 
                 for (const monster of Lookup.getMonsterList(entityId)) {
-                    this.pushMonsterToQueue(monster.id, entityId);
+                    this.pushMonsterToQueue(monster.id, entityId, false);
                 }
 
                 return true;
@@ -721,12 +729,16 @@ export class Simulation {
         return false;
     }
 
-    private pushMonsterToQueue(monsterId: string, entityId?: string) {
+    private pushMonsterToQueue(
+        monsterId: string,
+        entityId?: string,
+        onTask: boolean = Global.game.combat.player.isSlayerTask
+    ) {
         const simId = this.simId(monsterId, entityId);
 
         if (!this.monsterSimData[simId].inQueue) {
             this.monsterSimData[simId].inQueue = true;
-            this.queue.push({ monsterId, entityId });
+            this.queue.push({ monsterId, entityId, onTask });
         }
     }
 
@@ -778,7 +790,7 @@ export class Simulation {
         }
 
         // all checks passed
-        this.pushMonsterToQueue(monster.id);
+        this.pushMonsterToQueue(monster.id, undefined, true);
         return true;
     }
 
@@ -862,6 +874,9 @@ export class Simulation {
             Global.stores.simulator.set({ isRunning: true });
             this.current = 0;
             this.error = undefined;
+            // Capture the user's chosen toggle value; the dispatch loop overwrites the
+            // global flag per queue item and we restore this once the run completes.
+            this.userIsSlayerTask = Global.game.combat.player.isSlayerTask;
             return this.startQueue();
         } else {
             try {
@@ -878,6 +893,10 @@ export class Simulation {
         if (this.current < this.queue.length && !Global.cancelStatus) {
             const monsterId = this.queue[this.current].monsterId;
             const entityId = this.queue[this.current].entityId;
+            // Apply this queue item's on-task flag before serializing so the worker
+            // receives the correct value. Slayer-task items are on-task, dungeon/
+            // stronghold/depth items are off-task, plain monsters follow the user toggle.
+            Global.game.combat.player.isSlayerTask = this.queue[this.current].onTask;
             const saveString = Global.game.generateSaveStringSimple();
 
             this.current++;
@@ -913,6 +932,10 @@ export class Simulation {
             if (this.error) {
                 Bugs.report(true, { stack: this.error } as any);
             }
+
+            // Restore the user's chosen toggle value now that the run is done (or was
+            // cancelled) so the UI switch continues to reflect their setting.
+            Global.game.combat.player.isSlayerTask = this.userIsSlayerTask;
 
             // Check if none of the workers are in use
             Global.stores.simulator.set({ isRunning: false });
