@@ -205,6 +205,13 @@ export class TargetSelection extends HTMLElement {
         // and throws for anything else, which silently killed the whole category build.
         icon.dataset.mcssrc = definition.media;
         icon.dataset.mcssmall = '';
+
+        // ButtonImage always registers itself for a tooltip; without a content child the
+        // tooltip shows up empty, so give it the same style of label the old toolbar had.
+        const tooltip = createElement('div', { text: `Toggle ${definition.title}` });
+        tooltip.dataset.mcstooltipcontent = '';
+        icon.append(tooltip);
+
         icon._on(() => {
             definition.toggleAll();
             // Category toggles run through the plotter, which refreshes this panel via
@@ -271,14 +278,14 @@ export class TargetSelection extends HTMLElement {
         const groups: AreaGroup[] = [];
         const rows: TargetRow[] = [];
 
-        const addArea = (name: string, monsters: Monster[]) => {
+        const addArea = (name: string, monsters: Monster[], media?: string) => {
             const members = monsters.filter(predicate);
 
             if (!members.length) {
                 return;
             }
 
-            const group = this._buildAreaGroup(body, name);
+            const group = this._buildAreaGroup(body, name, media);
 
             for (const monster of members) {
                 const row = this._buildMonsterRow(group, monster);
@@ -290,24 +297,24 @@ export class TargetSelection extends HTMLElement {
         };
 
         for (const area of Lookup.combatAreas.combatAreas) {
-            addArea(area.name, area.monsters);
+            addArea(area.name, area.monsters, area.media);
         }
 
         const bard = Lookup.monsters.getObjectByID(Global.stores.game.state.bardId);
 
         if (bard) {
             const bardArea = Global.game.getMonsterArea(bard);
-            addArea(bardArea?.name ?? 'Wandering Bard', [bard]);
+            addArea(bardArea?.name ?? 'Wandering Bard', [bard], bardArea?.media);
         }
 
         for (const area of Lookup.combatAreas.slayer) {
-            addArea(area.name, area.monsters);
+            addArea(area.name, area.monsters, area.media);
         }
 
         return { groups, rows };
     }
 
-    private _buildAreaGroup(body: HTMLDivElement, name: string): AreaGroup {
+    private _buildAreaGroup(body: HTMLDivElement, name: string, media?: string): AreaGroup {
         const container = createElement('div', { className: 'mcs-target-selection-area' });
 
         const header = createElement('div', { className: 'mcs-target-selection-area-header' });
@@ -329,7 +336,15 @@ export class TargetSelection extends HTMLElement {
             container.classList.toggle('mcs-collapsed');
         };
 
-        header.append(toggle, name_, caret);
+        header.append(toggle);
+
+        if (media) {
+            const image = createElement('img', { className: 'mcs-target-selection-area-image' });
+            ImageLoader.register(image, media);
+            header.append(image);
+        }
+
+        header.append(name_, caret);
         container.append(header);
         body.append(container);
 
