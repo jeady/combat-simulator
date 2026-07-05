@@ -85,11 +85,39 @@ export class Plotter extends HTMLElement {
 
     private _bottomLength = 0;
 
-    private _information: Information;
-    private _inspect: HTMLButtonElement;
-    private _stopInspect: HTMLButtonElement;
-    private _targetSelection: TargetSelection;
-    private _loot: LootPage;
+    // Sibling elements are resolved lazily at use time: connect-time querySelector caching is
+    // ordering-dependent (the simulate page's children connect in tree order and cross-reference
+    // each other), and a null cached here breaks bar selection/inspect long after connect.
+    private _informationEl: Information;
+    private _inspectEl: HTMLButtonElement;
+    private _stopInspectEl: HTMLButtonElement;
+    private _targetSelectionEl: TargetSelection;
+    private _lootEl: LootPage;
+
+    private get _information(): Information {
+        this._informationEl ??= Global.userInterface.main.querySelector('.mcs-main-information');
+        return this._informationEl;
+    }
+
+    private get _inspect(): HTMLButtonElement {
+        this._inspectEl ??= Global.userInterface.main.querySelector('.mcs-inspect');
+        return this._inspectEl;
+    }
+
+    private get _stopInspect(): HTMLButtonElement {
+        this._stopInspectEl ??= Global.userInterface.main.querySelector('.mcs-stop-inspect');
+        return this._stopInspectEl;
+    }
+
+    private get _targetSelection(): TargetSelection {
+        this._targetSelectionEl ??= Global.userInterface.main.querySelector('mcs-target-selection');
+        return this._targetSelectionEl;
+    }
+
+    private get _loot(): LootPage {
+        this._lootEl ??= Global.userInterface.main.querySelector('mcs-loot');
+        return this._lootEl;
+    }
 
     constructor() {
         super();
@@ -109,12 +137,6 @@ export class Plotter extends HTMLElement {
         this.appendChild(this._content);
 
         this._create();
-
-        this._information = Global.userInterface.main.querySelector('.mcs-main-information');
-        this._inspect = Global.userInterface.main.querySelector('.mcs-inspect');
-        this._stopInspect = Global.userInterface.main.querySelector('.mcs-stop-inspect');
-        this._targetSelection = Global.userInterface.main.querySelector('mcs-target-selection');
-        this._loot = Global.userInterface.main.querySelector('mcs-loot');
 
         this._container.onwheel = event => {
             event.preventDefault();
