@@ -14,7 +14,6 @@ import { TooltipController } from 'src/app/user-interface/_parts/tooltip/tooltip
 import { Information } from 'src/app/user-interface/information/information';
 import { Notify } from 'src/app/utils/notify';
 import { Drops } from 'src/app/drops';
-import { Switch } from 'src/app/user-interface/_parts/switch/switch';
 import { LootPage } from 'src/app/user-interface/pages/configuration/loot/loot';
 import type { SimulatePage } from 'src/app/user-interface/pages/simulate/simulate';
 import { clone, uniqBy } from 'lodash-es';
@@ -78,7 +77,6 @@ export class Plotter extends HTMLElement {
 
     private _bottomLength = 0;
 
-    private _slayer: Switch;
     private _information: Information;
     private _inspect: HTMLButtonElement;
     private _stopInspect: HTMLButtonElement;
@@ -103,7 +101,6 @@ export class Plotter extends HTMLElement {
 
         this._create();
 
-        this._slayer = Global.userInterface.main.querySelector('.mcs-simulate-slayer-task');
         this._information = Global.userInterface.main.querySelector('.mcs-main-information');
         this._inspect = Global.userInterface.main.querySelector('.mcs-inspect');
         this._stopInspect = Global.userInterface.main.querySelector('.mcs-stop-inspect');
@@ -124,6 +121,7 @@ export class Plotter extends HTMLElement {
     public _toggleCross(index: number, toggle: boolean) {
         this._elements.xAxis[index]._toggle(toggle);
         (this.parentElement as SimulatePage)._updateSelectTarget();
+        (this.parentElement as SimulatePage)._refreshTargetSelection?.();
     }
 
     public _updateCrosses() {
@@ -159,6 +157,7 @@ export class Plotter extends HTMLElement {
         }
 
         (this.parentElement as SimulatePage)._updateSelectTarget();
+        (this.parentElement as SimulatePage)._refreshTargetSelection?.();
     }
 
     public _toggleZoneLabels(toggle: boolean) {
@@ -187,90 +186,20 @@ export class Plotter extends HTMLElement {
             const dungeonId = Global.stores.plotter.state.bars.monsterIds[index];
             checked = !Global.simulation.dungeonSimFilter[dungeonId];
 
-            if (checked && Global.game.combat.player.isSlayerTask) {
-                this._slayer._toggle(false);
-                Global.game.combat.player.isSlayerTask = false;
-
-                this.slayerToggled = false;
-
-                for (const taskId of Global.stores.game.state.taskIds) {
-                    Global.simulation.slayerSimFilter[taskId] = false;
-                }
-
-                this._updateCrosses();
-
-                Notify.message('Slayer Task has been disabled and simulating not being on task.', 'danger');
-            }
-
             Global.simulation.dungeonSimFilter[dungeonId] = checked;
         } else if (Global.stores.plotter.barIsStronghold(index)) {
             const strongholdId = Global.stores.plotter.state.bars.monsterIds[index];
             checked = !Global.simulation.strongholdSimFilter[strongholdId];
-
-            if (checked && Global.game.combat.player.isSlayerTask) {
-                this._slayer._toggle(false);
-                Global.game.combat.player.isSlayerTask = false;
-
-                this.slayerToggled = false;
-
-                for (const taskId of Global.stores.game.state.taskIds) {
-                    Global.simulation.slayerSimFilter[taskId] = false;
-                }
-
-                this._updateCrosses();
-
-                Notify.message('Slayer Task has been disabled and simulating not being on task.', 'danger');
-            }
 
             Global.simulation.strongholdSimFilter[strongholdId] = checked;
         } else if (Global.stores.plotter.barIsDepth(index)) {
             const depthId = Global.stores.plotter.state.bars.monsterIds[index];
             checked = !Global.simulation.depthSimFilter[depthId];
 
-            if (checked && Global.game.combat.player.isSlayerTask) {
-                this._slayer._toggle(false);
-                Global.game.combat.player.isSlayerTask = false;
-
-                this.slayerToggled = false;
-
-                for (const taskId of Global.stores.game.state.taskIds) {
-                    Global.simulation.slayerSimFilter[taskId] = false;
-                }
-
-                this._updateCrosses();
-
-                Notify.message('Slayer Task has been disabled and simulating not being on task.', 'danger');
-            }
-
             Global.simulation.depthSimFilter[depthId] = checked;
         } else if (Global.stores.plotter.barIsTask(index)) {
             const taskId = Global.stores.plotter.state.bars.monsterIds[index];
             checked = !Global.simulation.slayerSimFilter[taskId];
-
-            if (checked && !Global.game.combat.player.isSlayerTask) {
-                this._slayer._toggle(true);
-                Global.game.combat.player.isSlayerTask = true;
-
-                this.dungeonsToggled = false;
-                this.strongholdsToggled = false;
-                this.depthsToggled = false;
-
-                for (const dungeonId of Global.stores.game.state.dungeonIds) {
-                    Global.simulation.dungeonSimFilter[dungeonId] = false;
-                }
-
-                for (const strongholdId of Global.stores.game.state.strongholdIds) {
-                    Global.simulation.strongholdSimFilter[strongholdId] = false;
-                }
-
-                for (const depthId of Global.stores.game.state.depthIds) {
-                    Global.simulation.depthSimFilter[depthId] = false;
-                }
-
-                this._updateCrosses();
-
-                Notify.message('Slayer Task has been enabled and simulating as being on task.', 'success');
-            }
 
             Global.simulation.slayerSimFilter[taskId] = checked;
         } else {
@@ -345,18 +274,6 @@ export class Plotter extends HTMLElement {
     }
 
     public _toggleDungeons(toggle: boolean) {
-        if (toggle && Global.game.combat.player.isSlayerTask) {
-            this._slayer._toggle(false);
-            Global.game.combat.player.isSlayerTask = !toggle;
-            this.slayerToggled = !toggle;
-
-            for (const taskId of Global.stores.game.state.taskIds) {
-                Global.simulation.slayerSimFilter[taskId] = !toggle;
-            }
-
-            Notify.message('Slayer Task has been disabled and simulating not being on task.', 'danger');
-        }
-
         this.dungeonsToggled = toggle;
 
         for (const dungeonId of Global.stores.game.state.dungeonIds) {
@@ -368,18 +285,6 @@ export class Plotter extends HTMLElement {
     }
 
     public _toggleStrongholds(toggle: boolean) {
-        if (toggle && Global.game.combat.player.isSlayerTask) {
-            this._slayer._toggle(false);
-            Global.game.combat.player.isSlayerTask = !toggle;
-            this.slayerToggled = !toggle;
-
-            for (const taskId of Global.stores.game.state.taskIds) {
-                Global.simulation.slayerSimFilter[taskId] = !toggle;
-            }
-
-            Notify.message('Slayer Task has been disabled and simulating not being on task.', 'danger');
-        }
-
         this.strongholdsToggled = toggle;
 
         for (const strongholdId of Global.stores.game.state.strongholdIds) {
@@ -391,18 +296,6 @@ export class Plotter extends HTMLElement {
     }
 
     public _toggleDepths(toggle: boolean) {
-        if (toggle && Global.game.combat.player.isSlayerTask) {
-            this._slayer._toggle(false);
-            Global.game.combat.player.isSlayerTask = !toggle;
-            this.slayerToggled = !toggle;
-
-            for (const taskId of Global.stores.game.state.taskIds) {
-                Global.simulation.slayerSimFilter[taskId] = !toggle;
-            }
-
-            Notify.message('Slayer Task has been disabled and simulating not being on task.', 'danger');
-        }
-
         this.depthsToggled = toggle;
 
         for (const depthId of Global.stores.game.state.depthIds) {
@@ -414,32 +307,6 @@ export class Plotter extends HTMLElement {
     }
 
     public _toggleSlayer(toggle: boolean) {
-        if (toggle && !Global.game.combat.player.isSlayerTask) {
-            this._slayer._toggle(true);
-            Global.game.combat.player.isSlayerTask = toggle;
-            this.dungeonsToggled = !toggle;
-            this.strongholdsToggled = !toggle;
-            this.depthsToggled = !toggle;
-
-            for (const dungeonId of Global.stores.game.state.dungeonIds) {
-                Global.simulation.dungeonSimFilter[dungeonId] = !toggle;
-            }
-
-            for (const strongholdId of Global.stores.game.state.strongholdIds) {
-                Global.simulation.strongholdSimFilter[strongholdId] = !toggle;
-            }
-
-            for (const depthId of Global.stores.game.state.depthIds) {
-                Global.simulation.depthSimFilter[depthId] = !toggle;
-            }
-
-            Notify.message('Slayer Task has been enabled and simulating as being on task.', 'success');
-        } else if (!toggle && Global.game.combat.player.isSlayerTask) {
-            this._slayer._toggle(false);
-            Global.game.combat.player.isSlayerTask = toggle;
-            Notify.message('Slayer Task has been disabled and simulating not being on task.', 'danger');
-        }
-
         this.slayerToggled = toggle;
 
         for (const taskId of Global.stores.game.state.taskIds) {
@@ -1097,7 +964,7 @@ export class Plotter extends HTMLElement {
         return base.map((_, i) => (1 - x) * base[i] + x * death[i]);
     }
 
-    private getDetails(barIndex: number) {
+    public getDetails(barIndex: number) {
         let bar = { name: '', isFiltered: false };
 
         if (Global.stores.plotter.state.isInspecting) {

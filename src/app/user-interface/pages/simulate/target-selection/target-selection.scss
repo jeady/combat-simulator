@@ -1,0 +1,183 @@
+mcs-target-selection {
+    display: block;
+    margin: 0 0 20px;
+
+    .mcs-target-selection {
+        border: 1px solid var(--mcs-main-border-color);
+        background: var(--mcs-main-background-color);
+    }
+
+    .mcs-target-selection-toggle {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        padding: 10px 15px;
+        border: none;
+        cursor: pointer;
+        text-align: left;
+        color: var(--mcs-main-text-color);
+        background: var(--mcs-expandable-header-background-color);
+    }
+
+    .mcs-target-selection-toggle:hover {
+        background: var(--mcs-expandable-header-hover-color);
+    }
+
+    .mcs-target-selection-toggle-title {
+        font-weight: 600;
+    }
+
+    .mcs-target-selection-summary {
+        flex: 1;
+        font-size: 0.85em;
+        color: var(--mcs-descriptive-text-color);
+    }
+
+    .mcs-target-selection-chevron {
+        font-size: 0.75em;
+        transition: transform 0.15s ease;
+    }
+
+    .mcs-target-selection.mcs-collapsed .mcs-target-selection-chevron {
+        transform: rotate(180deg);
+    }
+
+    .mcs-target-selection.mcs-collapsed .mcs-target-selection-body {
+        display: none;
+    }
+
+    .mcs-target-selection-body {
+        border-top: 1px solid var(--mcs-expandable-body-border-color);
+        padding: 10px 15px;
+    }
+
+    .mcs-target-selection-search {
+        margin-bottom: 10px;
+    }
+
+    .mcs-target-selection-search-input {
+        width: 100%;
+        padding: 6px 10px;
+        color: var(--mcs-main-text-color);
+        background: var(--mcs-form-control-background-color);
+        border: 1px solid var(--mcs-form-control-border-color);
+    }
+
+    .mcs-target-selection-search-input::placeholder {
+        color: var(--mcs-form-control-placeholder-color);
+    }
+
+    .mcs-target-selection-sections {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-height: 340px;
+        overflow-y: auto;
+    }
+
+    .mcs-target-selection-section {
+        border: 1px solid var(--mcs-main-border-color);
+    }
+
+    .mcs-target-selection-section-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        background: var(--mcs-expandable-header-background-color);
+    }
+
+    .mcs-target-selection-section-toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: 1;
+        padding: 0;
+        border: none;
+        background: none;
+        cursor: pointer;
+        text-align: left;
+        color: var(--mcs-main-text-color);
+        font-weight: 600;
+    }
+
+    .mcs-target-selection-section-chevron {
+        font-size: 0.7em;
+        transition: transform 0.15s ease;
+    }
+
+    .mcs-target-selection-section.mcs-collapsed .mcs-target-selection-section-chevron {
+        transform: rotate(-90deg);
+    }
+
+    .mcs-target-selection-section-count {
+        font-size: 0.8em;
+        font-weight: 400;
+        color: var(--mcs-descriptive-text-color);
+    }
+
+    .mcs-target-selection-section-actions {
+        display: flex;
+        gap: 4px;
+    }
+
+    .mcs-target-selection-quick {
+        padding: 2px 8px;
+        border: 1px solid var(--mcs-form-control-border-color);
+        cursor: pointer;
+        font-size: 0.75em;
+        color: var(--mcs-button-secondary-text-color);
+        background: var(--mcs-button-secondary-color);
+    }
+
+    .mcs-target-selection-quick:hover {
+        background: var(--mcs-button-secondary-hover-color);
+    }
+
+    .mcs-target-selection-section.mcs-collapsed .mcs-target-selection-section-body {
+        display: none;
+    }
+
+    .mcs-target-selection-section-body {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .mcs-target-selection-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 10px;
+        cursor: pointer;
+    }
+
+    .mcs-target-selection-row:hover {
+        background: var(--mcs-slot-item-hover-color);
+    }
+
+    .mcs-target-selection-row input[type='checkbox'] {
+        cursor: pointer;
+        flex-shrink: 0;
+    }
+
+    .mcs-target-selection-row-image {
+        width: 22px;
+        height: 22px;
+        flex-shrink: 0;
+    }
+
+    .mcs-target-selection-row-name {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .mcs-target-selection-empty {
+        display: none;
+        padding: 10px 0 0;
+        font-size: 0.85em;
+        color: var(--mcs-descriptive-text-color);
+    }
+}

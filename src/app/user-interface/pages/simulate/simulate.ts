@@ -9,6 +9,7 @@ import { Drops } from 'src/app/drops';
 import { Switch } from 'src/app/user-interface/_parts/switch/switch';
 import { ButtonImage } from 'src/app/user-interface/_parts/button-image/button-image';
 import { StorageKey } from 'src/app/utils/account-storage';
+import { TargetSelection } from 'src/app/user-interface/pages/simulate/target-selection/target-selection';
 
 declare global {
     interface HTMLElementTagNameMap {
@@ -21,6 +22,7 @@ export class SimulatePage extends HTMLElement {
     private readonly _content = new DocumentFragment();
 
     private readonly _plotter: Plotter;
+    private readonly _targetSelection: TargetSelection;
     private readonly _toggleMonsters: ButtonImage;
     private readonly _toggleBarrierMonsters: ButtonImage;
     private readonly _toggleAbyssalMonsters: ButtonImage;
@@ -49,6 +51,11 @@ export class SimulatePage extends HTMLElement {
         this._content.append(getTemplateNode('mcs-simulate-template'));
 
         this._plotter = getElementFromFragment(this._content, 'mcs-plotter', 'mcs-plotter');
+        this._targetSelection = getElementFromFragment(
+            this._content,
+            'mcs-target-selection',
+            'mcs-target-selection'
+        );
         this._toggleMonsters = getElementFromFragment(this._content, 'mcs-toggle-monsters', 'mcs-button-image');
         this._toggleBarrierMonsters = getElementFromFragment(
             this._content,
@@ -203,17 +210,12 @@ export class SimulatePage extends HTMLElement {
 
         this._slayer._toggle(Global.game.combat.player.isSlayerTask);
         this._slayer._on(isChecked => {
+            // This flag now only scopes individual (plain) monster sims to being on-task.
+            // Slayer-task bars are always simulated on-task; dungeons/strongholds/depths never are.
+            // No mutual-exclusion force-toggles: dungeons and slayer tasks may be enabled simultaneously.
             Global.game.combat.player.isSlayerTask = isChecked;
 
-            // toggle dungeon sims off if slayer task is on
-            if (Global.game.combat.player.isSlayerTask) {
-                this._plotter._toggleDungeons(false);
-            }
-
-            // toggle auto slayer sims off if slayer task is off
-            if (!Global.game.combat.player.isSlayerTask) {
-                this._plotter._toggleSlayer(false);
-            }
+            this._plotter._updateData();
         });
 
         this._inspect.disabled = true;
@@ -249,6 +251,11 @@ export class SimulatePage extends HTMLElement {
         });
     }
 
+    /** Re-sync the target-selection panel checkboxes with the current sim filter state. */
+    public _refreshTargetSelection() {
+        this._targetSelection?._refresh();
+    }
+
     private _updateToggles() {
         this._toggleMonsters._toggle(this._plotter.monstersToggled);
         this._toggleBarrierMonsters._toggle(this._plotter.barrierMonstersToggled);
@@ -257,6 +264,8 @@ export class SimulatePage extends HTMLElement {
         this._toggleStrongholds._toggle(this._plotter.strongholdsToggled);
         this._toggleDepths._toggle(this._plotter.depthsToggled);
         this._toggleSlayer._toggle(this._plotter.slayerToggled);
+
+        this._refreshTargetSelection();
     }
 
     /**

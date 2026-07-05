@@ -1,0 +1,25 @@
+<template id="mcs-target-selection-template">
+    <div id="mcs-target-selection-root" class="mcs-target-selection mcs-collapsed">
+        <button id="mcs-target-selection-toggle" class="mcs-target-selection-toggle" type="button">
+            <span class="mcs-target-selection-toggle-title">Target Selection</span>
+            <span id="mcs-target-selection-summary" class="mcs-target-selection-summary"></span>
+            <span id="mcs-target-selection-chevron" class="mcs-target-selection-chevron">&#9650;</span>
+        </button>
+
+        <div id="mcs-target-selection-body" class="mcs-target-selection-body">
+            <div class="mcs-target-selection-search">
+                <input
+                    id="mcs-target-selection-search-input"
+                    class="mcs-target-selection-search-input"
+                    type="text"
+                    placeholder="Search targets..."
+                    autocomplete="off"
+                />
+            </div>
+
+            <div id="mcs-target-selection-sections" class="mcs-target-selection-sections"></div>
+
+            <div id="mcs-target-selection-empty" class="mcs-target-selection-empty">No targets match your search.</div>
+        </div>
+    </div>
+</template>

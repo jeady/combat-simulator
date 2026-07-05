@@ -19,6 +19,7 @@ import 'src/app/user-interface/summary/summary';
 import 'src/app/user-interface/pages/pages';
 import 'src/app/user-interface/pages/simulate/simulate';
 import 'src/app/user-interface/pages/auto-optimize/auto-optimize';
+import 'src/app/user-interface/pages/simulate/target-selection/target-selection';
 import 'src/app/user-interface/pages/simulate/plotter/plotter';
 import 'src/app/user-interface/pages/simulate/plotter/grid-line/grid-line';
 import 'src/app/user-interface/pages/simulate/plotter/bar/bar';
