@@ -6,19 +6,13 @@ mcs-plotter-x-axis-label {
     height: 27px;
     position: relative;
 
+    cursor: pointer;
+
     .mcs-plotter-x-axis-image {
         width: 100%;
         height: 100%;
         top: 0;
         left: 0;
         position: absolute;
-    }
-
-    .mcs-plotter-x-axis-cross {
-        width: 80%;
-        top: 10%;
-        left: 10%;
-        position: absolute;
-        pointer-events: none;
     }
 }

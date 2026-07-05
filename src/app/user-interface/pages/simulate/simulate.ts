@@ -7,7 +7,6 @@ import { PlotKey } from 'src/app/stores/plotter.store';
 import { Information } from 'src/app/user-interface/information/information';
 import { Drops } from 'src/app/drops';
 import { Switch } from 'src/app/user-interface/_parts/switch/switch';
-import { ButtonImage } from 'src/app/user-interface/_parts/button-image/button-image';
 import { StorageKey } from 'src/app/utils/account-storage';
 import { TargetSelection } from 'src/app/user-interface/pages/simulate/target-selection/target-selection';
 
@@ -23,13 +22,6 @@ export class SimulatePage extends HTMLElement {
 
     private readonly _plotter: Plotter;
     private readonly _targetSelection: TargetSelection;
-    private readonly _toggleMonsters: ButtonImage;
-    private readonly _toggleBarrierMonsters: ButtonImage;
-    private readonly _toggleAbyssalMonsters: ButtonImage;
-    private readonly _toggleDungeons: ButtonImage;
-    private readonly _toggleStrongholds: ButtonImage;
-    private readonly _toggleDepths: ButtonImage;
-    private readonly _toggleSlayer: ButtonImage;
 
     private readonly _skill: Dropdown;
     private readonly _plotType: Dropdown;
@@ -56,21 +48,6 @@ export class SimulatePage extends HTMLElement {
             'mcs-target-selection',
             'mcs-target-selection'
         );
-        this._toggleMonsters = getElementFromFragment(this._content, 'mcs-toggle-monsters', 'mcs-button-image');
-        this._toggleBarrierMonsters = getElementFromFragment(
-            this._content,
-            'mcs-toggle-barrier-monsters',
-            'mcs-button-image'
-        );
-        this._toggleAbyssalMonsters = getElementFromFragment(
-            this._content,
-            'mcs-toggle-abyssal-monsters',
-            'mcs-button-image'
-        );
-        this._toggleDungeons = getElementFromFragment(this._content, 'mcs-toggle-dungeons', 'mcs-button-image');
-        this._toggleStrongholds = getElementFromFragment(this._content, 'mcs-toggle-strongholds', 'mcs-button-image');
-        this._toggleDepths = getElementFromFragment(this._content, 'mcs-toggle-depths', 'mcs-button-image');
-        this._toggleSlayer = getElementFromFragment(this._content, 'mcs-toggle-slayer', 'mcs-button-image');
 
         this._skill = getElementFromFragment(this._content, 'mcs-skill', 'mcs-dropdown');
         this._plotType = getElementFromFragment(this._content, 'mcs-plot-type', 'mcs-dropdown');
@@ -86,51 +63,9 @@ export class SimulatePage extends HTMLElement {
     public connectedCallback() {
         this.appendChild(this._content);
 
-        if (!cloudManager.hasItAEntitlementAndIsEnabled) {
-            this._toggleDepths.style.display = 'none';
-            this._toggleAbyssalMonsters.style.display = 'none';
-        }
-
-        if (!cloudManager.hasAoDEntitlementAndIsEnabled) {
-            this._toggleBarrierMonsters.style.display = 'none';
-        }
-
+        // The seven category quick-toggle icons now live inside the target-selection panel; it wires
+        // them to the same plotter toggle methods and hides categories the account is not entitled to.
         this._updateToggles();
-
-        this._toggleMonsters._on(() => {
-            this._plotter._toggleMonsters();
-            this._updateToggles();
-        });
-
-        this._toggleBarrierMonsters._on(() => {
-            this._plotter._toggleBarrierMonsters();
-            this._updateToggles();
-        });
-
-        this._toggleAbyssalMonsters._on(() => {
-            this._plotter._toggleAbyssalMonsters();
-            this._updateToggles();
-        });
-
-        this._toggleDungeons._on(() => {
-            this._plotter._toggleDungeons(!this._plotter.dungeonsToggled);
-            this._updateToggles();
-        });
-
-        this._toggleStrongholds._on(() => {
-            this._plotter._toggleStrongholds(!this._plotter.strongholdsToggled);
-            this._updateToggles();
-        });
-
-        this._toggleDepths._on(() => {
-            this._plotter._toggleDepths(!this._plotter.depthsToggled);
-            this._updateToggles();
-        });
-
-        this._toggleSlayer._on(() => {
-            this._plotter._toggleSlayer(!this._plotter.slayerToggled);
-            this._updateToggles();
-        });
 
         this._updateSelectTarget();
 
@@ -257,14 +192,9 @@ export class SimulatePage extends HTMLElement {
     }
 
     private _updateToggles() {
-        this._toggleMonsters._toggle(this._plotter.monstersToggled);
-        this._toggleBarrierMonsters._toggle(this._plotter.barrierMonstersToggled);
-        this._toggleAbyssalMonsters._toggle(this._plotter.abyssalMonstersToggled);
-        this._toggleDungeons._toggle(this._plotter.dungeonsToggled);
-        this._toggleStrongholds._toggle(this._plotter.strongholdsToggled);
-        this._toggleDepths._toggle(this._plotter.depthsToggled);
-        this._toggleSlayer._toggle(this._plotter.slayerToggled);
-
+        // The category icons + rows live in the panel; sync their pressed/checked state from the
+        // plotter's category-toggle flags and the current sim filters.
+        this._targetSelection?._syncToggles();
         this._refreshTargetSelection();
     }
 

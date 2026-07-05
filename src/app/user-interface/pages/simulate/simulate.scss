@@ -1,26 +1,4 @@
 mcs-simulate {
-    .mcs-simulate-toggle-title {
-        margin-bottom: 5px;
-    }
-
-    .mcs-toggle-monsters,
-    .mcs-toggle-barrier-monsters,
-    .mcs-toggle-dungeons,
-    .mcs-toggle-strongholds,
-    .mcs-toggle-depths,
-    .mcs-toggle-slayer {
-        img {
-            width: 22px;
-            height: 22px;
-        }
-    }
-
-    .mcs-simulate-toggle {
-        display: flex;
-        gap: 5px;
-        flex-wrap: wrap;
-    }
-
     .mcs-simulate-button-container {
         display: flex;
         gap: 20px;
@@ -86,14 +64,6 @@ mcs-simulate {
         .mcs-simulate-button-container {
             flex-direction: column;
             gap: 10px;
-        }
-
-        mcs-simulate-buttons {
-            order: 1;
-        }
-
-        .mcs-simulate-toggle-container {
-            order: 0;
         }
     }
 }

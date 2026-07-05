@@ -79,4 +79,24 @@ mcs-plotter {
         border-right-style: solid;
         pointer-events: none;
     }
+
+    .mcs-plot-empty {
+        display: none;
+        position: absolute;
+        top: 0;
+        left: 85px;
+        right: 0.25rem;
+        height: 280px;
+        margin-top: 20px;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 0 20px;
+        color: var(--mcs-descriptive-text-color);
+        pointer-events: none;
+    }
+
+    .mcs-plot-empty.mcs-visible {
+        display: flex;
+    }
 }

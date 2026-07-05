@@ -16,6 +16,7 @@ import { Notify } from 'src/app/utils/notify';
 import { Drops } from 'src/app/drops';
 import { LootPage } from 'src/app/user-interface/pages/configuration/loot/loot';
 import type { SimulatePage } from 'src/app/user-interface/pages/simulate/simulate';
+import type { TargetSelection } from 'src/app/user-interface/pages/simulate/target-selection/target-selection';
 import { clone, uniqBy } from 'lodash-es';
 
 declare global {
@@ -57,6 +58,7 @@ export class Plotter extends HTMLElement {
     private readonly _plotBox: HTMLDivElement;
     private readonly _yAxis: HTMLDivElement;
     private readonly _xAxis: HTMLDivElement;
+    private readonly _empty: HTMLDivElement;
 
     private readonly bars: Bars = {
         totalBars: 0,
@@ -65,6 +67,12 @@ export class Plotter extends HTMLElement {
         bottomNames: [],
         bottomLength: []
     };
+
+    /** Zone (bottom-label group) index each bar belongs to, parallel to the bar list. */
+    private readonly _barZone: number[] = [];
+
+    /** Number of bars currently visible per zone, recomputed whenever filters change. */
+    private _visibleByZone: number[] = [];
 
     private readonly _elements: Elements = {
         gridLines: [],
@@ -80,7 +88,7 @@ export class Plotter extends HTMLElement {
     private _information: Information;
     private _inspect: HTMLButtonElement;
     private _stopInspect: HTMLButtonElement;
-    private _toggles: HTMLDivElement;
+    private _targetSelection: TargetSelection;
     private _loot: LootPage;
 
     constructor() {
@@ -94,6 +102,7 @@ export class Plotter extends HTMLElement {
         this._plotBox = getElementFromFragment(this._content, 'mcs-plot-box', 'div');
         this._yAxis = getElementFromFragment(this._content, 'mcs-plot-y-axis', 'div');
         this._xAxis = getElementFromFragment(this._content, 'mcs-plot-x-axis', 'div');
+        this._empty = getElementFromFragment(this._content, 'mcs-plot-empty', 'div');
     }
 
     public connectedCallback() {
@@ -104,7 +113,7 @@ export class Plotter extends HTMLElement {
         this._information = Global.userInterface.main.querySelector('.mcs-main-information');
         this._inspect = Global.userInterface.main.querySelector('.mcs-inspect');
         this._stopInspect = Global.userInterface.main.querySelector('.mcs-stop-inspect');
-        this._toggles = Global.userInterface.main.querySelector('.mcs-simulate-toggle-container');
+        this._targetSelection = Global.userInterface.main.querySelector('mcs-target-selection');
         this._loot = Global.userInterface.main.querySelector('mcs-loot');
 
         this._container.onwheel = event => {
@@ -118,46 +127,67 @@ export class Plotter extends HTMLElement {
         };
     }
 
-    public _toggleCross(index: number, toggle: boolean) {
-        this._elements.xAxis[index]._toggle(toggle);
-        (this.parentElement as SimulatePage)._updateSelectTarget();
-        (this.parentElement as SimulatePage)._refreshTargetSelection?.();
-    }
+    /**
+     * Show only enabled targets: any bar whose sim filter is false is removed from layout
+     * (display:none) so the remaining bars re-flow to fill the width. Zone section markers and
+     * labels are re-sized against the visible-bar counts so they stay aligned. Filters never apply
+     * while inspecting (all monsters of the inspected entity are shown regardless).
+     *
+     * Also notifies the parent so the Select Target dropdown and the target panel stay in sync, and
+     * clears the current selection if the selected bar just became hidden.
+     */
+    public _applyVisibility() {
+        if (Global.stores.plotter.state.isInspecting) {
+            (this.parentElement as SimulatePage)?._updateSelectTarget?.();
+            (this.parentElement as SimulatePage)?._refreshTargetSelection?.();
+            return;
+        }
 
-    public _updateCrosses() {
-        for (const index of Global.stores.plotter.state.bars.types.keys()) {
-            if (
-                Global.stores.plotter.barIsMonster(index) &&
-                !Global.simulation.monsterSimFilter[Global.stores.plotter.state.bars.monsterIds[index]]
-            ) {
-                this._elements.xAxis[index]._toggle(true);
-            } else if (
-                Global.stores.plotter.barIsDungeon(index) &&
-                !Global.simulation.dungeonSimFilter[Global.stores.plotter.state.bars.monsterIds[index]]
-            ) {
-                this._elements.xAxis[index]._toggle(true);
-            } else if (
-                Global.stores.plotter.barIsStronghold(index) &&
-                !Global.simulation.strongholdSimFilter[Global.stores.plotter.state.bars.monsterIds[index]]
-            ) {
-                this._elements.xAxis[index]._toggle(true);
-            } else if (
-                Global.stores.plotter.barIsDepth(index) &&
-                !Global.simulation.depthSimFilter[Global.stores.plotter.state.bars.monsterIds[index]]
-            ) {
-                this._elements.xAxis[index]._toggle(true);
-            } else if (
-                Global.stores.plotter.barIsTask(index) &&
-                !Global.simulation.slayerSimFilter[Global.stores.plotter.state.bars.monsterIds[index]]
-            ) {
-                this._elements.xAxis[index]._toggle(true);
-            } else {
-                this._elements.xAxis[index]._toggle(false);
+        const zoneCount = this.bars.bottomLength.length;
+        this._visibleByZone = new Array(zoneCount).fill(0);
+
+        let anyVisible = false;
+
+        for (let index = 0; index < this._elements.bars.length; index++) {
+            const visible = !this.isFiltered(index);
+
+            this._elements.bars[index].style.display = visible ? '' : 'none';
+            this._elements.xAxis[index].style.display = visible ? '' : 'none';
+
+            if (visible) {
+                anyVisible = true;
+
+                const zone = this._barZone[index];
+
+                if (zone !== undefined) {
+                    this._visibleByZone[zone]++;
+                }
             }
         }
 
-        (this.parentElement as SimulatePage)._updateSelectTarget();
-        (this.parentElement as SimulatePage)._refreshTargetSelection?.();
+        // If the selected bar was just hidden, clear the selection and reset the Inspect button.
+        if (
+            Global.stores.plotter.state.isBarSelected &&
+            Global.stores.plotter.state.selectedBar !== undefined &&
+            this.isFiltered(Global.stores.plotter.state.selectedBar)
+        ) {
+            this._toggleHighlight(Global.stores.plotter.state.selectedBar, false);
+            Global.stores.plotter.set({ isBarSelected: false, selectedBar: undefined });
+
+            if (this._inspect) {
+                this._inspect.disabled = true;
+            }
+
+            this._information?._update();
+            this._loot?._update();
+        }
+
+        this._empty.classList.toggle('mcs-visible', !anyVisible);
+
+        this._layoutZones(this._visibleByZone);
+
+        (this.parentElement as SimulatePage)?._updateSelectTarget?.();
+        (this.parentElement as SimulatePage)?._refreshTargetSelection?.();
     }
 
     public _toggleZoneLabels(toggle: boolean) {
@@ -208,8 +238,6 @@ export class Plotter extends HTMLElement {
             checked = Global.simulation.monsterSimFilter[monsterId];
         }
 
-        this._toggleCross(index, !checked);
-
         if (!checked && Global.stores.plotter.state.selectedBar === index) {
             Global.stores.plotter.set({ isBarSelected: false });
             this._toggleHighlight(index, false);
@@ -236,7 +264,6 @@ export class Plotter extends HTMLElement {
         }
 
         this._updateData();
-        this._updateCrosses();
     }
 
     public _toggleBarrierMonsters() {
@@ -251,7 +278,6 @@ export class Plotter extends HTMLElement {
         }
 
         this._updateData();
-        this._updateCrosses();
     }
 
     public _toggleAbyssalMonsters() {
@@ -270,7 +296,6 @@ export class Plotter extends HTMLElement {
         }
 
         this._updateData();
-        this._updateCrosses();
     }
 
     public _toggleDungeons(toggle: boolean) {
@@ -281,7 +306,6 @@ export class Plotter extends HTMLElement {
         }
 
         this._updateData();
-        this._updateCrosses();
     }
 
     public _toggleStrongholds(toggle: boolean) {
@@ -292,7 +316,6 @@ export class Plotter extends HTMLElement {
         }
 
         this._updateData();
-        this._updateCrosses();
     }
 
     public _toggleDepths(toggle: boolean) {
@@ -303,7 +326,6 @@ export class Plotter extends HTMLElement {
         }
 
         this._updateData();
-        this._updateCrosses();
     }
 
     public _toggleSlayer(toggle: boolean) {
@@ -314,7 +336,6 @@ export class Plotter extends HTMLElement {
         }
 
         this._updateData();
-        this._updateCrosses();
     }
 
     public _selectTarget(current: number) {
@@ -489,15 +510,11 @@ export class Plotter extends HTMLElement {
 
         this._toggleZoneLabels(false);
 
-        for (const xAxis of this._elements.xAxis) {
-            xAxis._toggle(false);
-        }
+        this._empty.classList.remove('mcs-visible');
 
         this._inspect.style.display = 'none';
         this._stopInspect.style.display = '';
-        this._toggles.querySelectorAll<HTMLButtonElement>('.mcs-button').forEach(button => {
-            button.disabled = true;
-        });
+        this._targetSelection?._setInspecting(true);
 
         this._container.scrollLeft = 0;
     }
@@ -531,14 +548,12 @@ export class Plotter extends HTMLElement {
         }
 
         this._toggleZoneLabels(true);
-        this._updateCrosses();
+        this._applyVisibility();
 
         this._inspect.disabled = Global.stores.plotter.barIsMonster(Global.stores.plotter.state.selectedBar);
         this._inspect.style.display = '';
         this._stopInspect.style.display = 'none';
-        this._toggles.querySelectorAll<HTMLButtonElement>('.mcs-button').forEach(button => {
-            button.disabled = false;
-        });
+        this._targetSelection?._setInspecting(false);
 
         this._container.scrollLeft = Global.stores.plotter.state.scrollLeft;
 
@@ -581,6 +596,7 @@ export class Plotter extends HTMLElement {
 
     public _updateData() {
         this._update(Global.simulation.getDataSet(), Global.simulation.getRawData());
+        this._applyVisibility();
     }
 
     public _updateLabels(isCreate = false) {
@@ -630,6 +646,47 @@ export class Plotter extends HTMLElement {
         }
     }
 
+    /**
+     * Re-position the zone section markers and labels against a per-zone count of currently visible
+     * bars (rather than the fixed total). Zones with no visible bars collapse to nothing and their
+     * label is hidden, so the markers stay aligned with the re-flowed bars.
+     */
+    private _layoutZones(counts: number[]) {
+        // `_elements.labels`/`sections` were created in reverse zone order; reverse to index by zone.
+        const labels = clone(this._elements.labels).reverse();
+        const sections = clone(this._elements.sections).reverse();
+
+        const total = counts.reduce((sum, count) => sum + count, 0) || 1;
+
+        let cumulative = 0;
+        let firstVisibleZone = -1;
+
+        for (let i = 0; i < counts.length; i++) {
+            if (counts[i] > 0 && firstVisibleZone === -1) {
+                firstVisibleZone = i;
+            }
+        }
+
+        for (let i = this.bars.bottomNames.length - 1; i > -1; i--) {
+            const count = counts[i] ?? 0;
+            const visible = count > 0;
+
+            if (labels[i]) {
+                labels[i].style.display = visible ? '' : 'none';
+                labels[i].style.right = `${(100 * cumulative) / total + (50 * count) / total}%`;
+            }
+
+            if (sections[i]) {
+                sections[i].style.display = visible ? '' : 'none';
+                sections[i].style.width = `${(100 * count) / total}%`;
+                sections[i].style.right = `${(100 * cumulative) / total}%`;
+                sections[i].style.borderLeftStyle = i === firstVisibleZone ? 'solid' : '';
+            }
+
+            cumulative += count;
+        }
+    }
+
     private _create() {
         for (let i = 0; i < 20; i++) {
             const gridLine = document.createElement('mcs-plotter-grid-line');
@@ -676,7 +733,7 @@ export class Plotter extends HTMLElement {
 
         this._onLoad(dataSet.length);
         this._update(dataSet, Global.simulation.getRawData());
-        this._updateCrosses();
+        this._applyVisibility();
     }
 
     private _onLoad(bars: number) {
@@ -729,6 +786,10 @@ export class Plotter extends HTMLElement {
             types.push(BarType.Task);
         }
 
+        // Each bottom-label group is a "zone"; record which zone every bar element belongs to so
+        // that visibility recomputes (which hide filtered-out bars) can re-size the zone markers.
+        let zone = 0;
+
         for (const area of Lookup.combatAreas.combatAreas) {
             this.bars.totalBars += area.monsters.length;
             this.bars.bottomNames.push(area.name);
@@ -737,7 +798,10 @@ export class Plotter extends HTMLElement {
             for (const monster of area.monsters) {
                 this.bars.names.push(monster.name);
                 this.bars.images.push(monster.media);
+                this._barZone.push(zone);
             }
+
+            zone++;
         }
 
         this.bars.totalBars += 1;
@@ -748,6 +812,8 @@ export class Plotter extends HTMLElement {
 
         this.bars.names.push(Format.getMonsterName(bard.id));
         this.bars.images.push(bard.media);
+        this._barZone.push(zone);
+        zone++;
 
         for (const area of Lookup.combatAreas.slayer) {
             this.bars.totalBars += area.monsters.length;
@@ -757,7 +823,10 @@ export class Plotter extends HTMLElement {
             for (const monster of area.monsters) {
                 this.bars.names.push(monster.name);
                 this.bars.images.push(monster.media);
+                this._barZone.push(zone);
             }
+
+            zone++;
         }
 
         this.bars.totalBars += Lookup.combatAreas.dungeons.length;
@@ -767,7 +836,10 @@ export class Plotter extends HTMLElement {
         for (const dungeon of Lookup.combatAreas.dungeons) {
             this.bars.names.push(Format.replaceApostrophe(dungeon.name));
             this.bars.images.push(dungeon.media);
+            this._barZone.push(zone);
         }
+
+        zone++;
 
         this.bars.totalBars += Lookup.combatAreas.strongholds.length;
         this.bars.bottomNames.push('Strongholds');
@@ -776,7 +848,10 @@ export class Plotter extends HTMLElement {
         for (const stronghold of Lookup.combatAreas.strongholds) {
             this.bars.names.push(Format.replaceApostrophe(stronghold.name));
             this.bars.images.push(stronghold.media);
+            this._barZone.push(zone);
         }
+
+        zone++;
 
         this.bars.totalBars += Lookup.combatAreas.depths.length;
         this.bars.bottomNames.push('The Abyss');
@@ -785,7 +860,10 @@ export class Plotter extends HTMLElement {
         for (const depth of Lookup.combatAreas.depths) {
             this.bars.names.push(Format.replaceApostrophe(depth.name));
             this.bars.images.push(depth.media);
+            this._barZone.push(zone);
         }
+
+        zone++;
 
         this.bars.totalBars += Lookup.tasks.allObjects.length;
         this.bars.bottomNames.push('Auto Slayer');
@@ -794,7 +872,10 @@ export class Plotter extends HTMLElement {
         for (const task of Lookup.tasks.allObjects) {
             this.bars.names.push(`${task.localID} Slayer Tasks`);
             this.bars.images.push(Global.game.slayer.media);
+            this._barZone.push(zone);
         }
+
+        zone++;
 
         Global.stores.plotter.set({
             bars: {
