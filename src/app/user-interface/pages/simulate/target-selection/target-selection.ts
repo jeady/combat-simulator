@@ -187,7 +187,11 @@ export class TargetSelection extends HTMLElement {
                 continue;
             }
 
-            this._categories.push(this._buildCategory(definition));
+            try {
+                this._categories.push(this._buildCategory(definition));
+            } catch (exception) {
+                Global.logger.error(`Failed to build target category '${definition.key}'.`, exception);
+            }
         }
     }
 
@@ -197,7 +201,10 @@ export class TargetSelection extends HTMLElement {
         const header = createElement('div', { className: 'mcs-target-selection-category-header' });
 
         const icon = createElement('mcs-button-image', { className: 'mcs-target-selection-category-icon' });
-        icon.dataset.mcssrc = Global.context.getResourceUrl(definition.media);
+        // Raw relative path, resolved against the game origin like the old toolbar buttons did —
+        // these are GAME assets; Global.context.getResourceUrl only resolves mod-packaged resources
+        // and throws for anything else, which silently killed the whole category build.
+        icon.dataset.mcssrc = definition.media;
         icon.dataset.mcssmall = '';
         icon._on(() => {
             definition.toggleAll();
