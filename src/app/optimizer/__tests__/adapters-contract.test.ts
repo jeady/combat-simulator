@@ -10,7 +10,7 @@
  * purity boundary is unchanged. Everything the adapters read off the game is modelled by the minimal
  * `FakeGame` / registry shapes below; nothing here needs a real save, worker, or Monte-Carlo sim.
  *
- * What remains in-game-verify-only (logged in docs/remediation-log.md): GameLoadoutApplier's
+ * What remains in-game-verify-only (see docs/auto-optimize-roadmap.md R7): GameLoadoutApplier's
  * SettingsController round-trips and GameScorer's worker sim paths.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -750,7 +750,7 @@ describe('dungeonTargetId / aggregate isSupportedTarget', () => {
 
 /**
  * Scope item 4 — foodSignature / combatPotionIds candidate shaping — was reviewed and left to
- * in-game verification (logged in docs/remediation-log.md). Both `foodSignature` and `combatPotionIds`
+ * in-game verification. Both `foodSignature` and `combatPotionIds`
  * are module-private and NOT exported from adapters.ts, and neither the food nor the potion dimension
  * is individually exported (they're assembled inside the game-coupled `buildDimensions`). Their pure
  * cores are the de-dupe/collapse logic already covered headless by dedupe.test.ts; stubbing the full

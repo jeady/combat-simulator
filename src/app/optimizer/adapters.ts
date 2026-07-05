@@ -76,7 +76,7 @@ const MINIMIZE_KEYS = new Set<PlotKey>([
 /**
  * Metrics that come back `NaN` from the worker and are only filled in by `Drops.update()`
  * against the full result set. Not supported as an auto-optimize objective in P1 — the UI
- * should reject them up front. See `docs/auto-optimize.md` §9.4.
+ * should reject them up front. See `docs/auto-optimize-design.md` §8.
  */
 export const UNSUPPORTED_KEYS = new Set<PlotKey>([
     PlotKey.GP,

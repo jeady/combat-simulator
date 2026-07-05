@@ -3,7 +3,7 @@
  *
  * Kept game-agnostic (no `Global.*`) so it's unit-testable headless: callers in `adapters.ts` read
  * the real item fields (`WeaponItem.attackType` / `ammoTypeRequired`, ammo `ammoType`, the player's
- * current `attackType`) and pass the plain values in. See `docs/auto-optimize.md`.
+ * current `attackType`) and pass the plain values in. See `docs/auto-optimize-design.md`.
  */
 
 /** The three combat attack types a weapon can have. */

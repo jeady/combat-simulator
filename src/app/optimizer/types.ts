@@ -177,7 +177,7 @@ export interface OptimizeOptions {
      * and the scorer supports {@link Scorer.evaluateFresh}, the optimizer re-simulates the proposed
      * winner once more and only commits if the REPLICATE still clears the accept margin — and commits
      * with the replicate's (unbiased) score, not the lucky sample. Default true. See
-     * `docs/auto-optimize-search.md`.
+     * `docs/auto-optimize-design.md` §5.5.
      */
     confirmSwaps: boolean;
     /**
@@ -194,7 +194,7 @@ export interface OptimizeOptions {
      * abort threshold is derived from `deathRateThreshold` and the trial count, so it never discards
      * a setup that could still have ended feasible. The final re-score never aborts (so the reported
      * death rate is exact). Default true; set false to always run full trials. See
-     * `docs/auto-optimize-search.md` §2a.
+     * `docs/auto-optimize-design.md` §6.1.
      */
     earlyStopOnDeath: boolean;
     /**

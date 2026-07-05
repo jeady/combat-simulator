@@ -4,7 +4,7 @@
  * Pure search logic: depends only on the injected {@link Scorer}, {@link Dimension}[] and
  * {@link SetupApplier} interfaces — no game/`Global.*` dependency — so it runs headless under
  * Node with fakes (see `__tests__`). It iterates generic "dimensions" (equipment slots,
- * prayers, potion, food, …), mutating one at a time. See `docs/auto-optimize.md`.
+ * prayers, potion, food, …), mutating one at a time. See `docs/auto-optimize-design.md`.
  */
 import {
     CancelToken,
