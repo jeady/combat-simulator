@@ -49,6 +49,7 @@ mcs-target-selection {
         align-items: center;
         gap: 10px;
         padding: 6px 10px;
+        cursor: pointer;
         background: var(--mcs-expandable-header-background-color);
     }
 
@@ -56,22 +57,14 @@ mcs-target-selection {
         flex-shrink: 0;
     }
 
-    .mcs-target-selection-category-arrow {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 22px;
-        height: 22px;
+    .mcs-target-selection-caret {
         flex-shrink: 0;
-        border: none;
-        cursor: pointer;
         font-size: 0.7em;
         color: var(--mcs-main-text-color);
-        background: none;
         transition: transform 0.15s ease;
     }
 
-    .mcs-target-selection-category.mcs-expanded .mcs-target-selection-category-arrow {
+    .mcs-target-selection-category.mcs-expanded .mcs-target-selection-category-header .mcs-target-selection-caret {
         transform: rotate(90deg);
     }
 
@@ -102,22 +95,32 @@ mcs-target-selection {
     }
 
     .mcs-target-selection-area-header {
-        padding: 5px 10px;
-        background: var(--mcs-expandable-header-background-color);
-    }
-
-    .mcs-target-selection-area-label {
         display: flex;
         align-items: center;
         gap: 8px;
+        padding: 5px 10px;
         cursor: pointer;
         font-weight: 600;
         font-size: 0.9em;
+        background: var(--mcs-expandable-header-background-color);
     }
 
-    .mcs-target-selection-area-label input[type='checkbox'] {
+    .mcs-target-selection-area-header input[type='checkbox'] {
         cursor: pointer;
         flex-shrink: 0;
+    }
+
+    .mcs-target-selection-area-name {
+        flex: 1;
+    }
+
+    .mcs-target-selection-area:not(.mcs-collapsed) .mcs-target-selection-area-header .mcs-target-selection-caret {
+        transform: rotate(90deg);
+    }
+
+    // Collapsed area: hide its monster rows (wins over the inline display set by search).
+    .mcs-target-selection-area.mcs-collapsed .mcs-target-selection-row {
+        display: none !important;
     }
 
     .mcs-target-selection-row {

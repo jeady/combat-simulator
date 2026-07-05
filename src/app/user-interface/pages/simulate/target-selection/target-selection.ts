@@ -48,7 +48,6 @@ interface Category {
     build: (body: HTMLDivElement) => { groups: AreaGroup[]; rows: TargetRow[] };
     // Runtime element references, populated by _buildCategory.
     icon?: ButtonImage;
-    arrow?: HTMLButtonElement;
     container?: HTMLDivElement;
     body?: HTMLDivElement;
     count?: HTMLSpanElement;
@@ -213,10 +212,6 @@ export class TargetSelection extends HTMLElement {
             this._syncToggles();
         });
 
-        const arrow = createElement('button', { className: 'mcs-target-selection-category-arrow' });
-        arrow.type = 'button';
-        arrow.innerHTML = '&#9654;';
-
         const title = createElement('span', {
             className: 'mcs-target-selection-category-title',
             text: definition.title
@@ -224,12 +219,20 @@ export class TargetSelection extends HTMLElement {
 
         const count = createElement('span', { className: 'mcs-target-selection-category-count' });
 
-        arrow.onclick = () => {
+        const caret = createElement('span', { className: 'mcs-target-selection-caret', text: '▸' });
+
+        // The whole header expands/collapses; only the icon is the category on/off toggle
+        // (its click bubbles up here, so guard it out).
+        header.onclick = event => {
+            if (event.target === icon || icon.contains(event.target as Node)) {
+                return;
+            }
+
             this._ensureBuilt(definition);
             container.classList.toggle('mcs-expanded');
         };
 
-        header.append(icon, arrow, title, count);
+        header.append(icon, title, count, caret);
 
         const body = createElement('div', { className: 'mcs-target-selection-category-body' });
 
@@ -237,7 +240,6 @@ export class TargetSelection extends HTMLElement {
         this._categoriesContainer.append(container);
 
         definition.icon = icon;
-        definition.arrow = arrow;
         definition.container = container;
         definition.body = body;
         definition.count = count;
@@ -310,15 +312,24 @@ export class TargetSelection extends HTMLElement {
 
         const header = createElement('div', { className: 'mcs-target-selection-area-header' });
 
-        const label = createElement('label', { className: 'mcs-target-selection-area-label' });
-
         const toggle = createElement('input');
         toggle.type = 'checkbox';
 
         const name_ = createElement('span', { className: 'mcs-target-selection-area-name', text: name });
 
-        label.append(toggle, name_);
-        header.append(label);
+        const caret = createElement('span', { className: 'mcs-target-selection-caret', text: '▸' });
+
+        // Same mechanism as the category headers: the header collapses/expands the area's
+        // monster rows; only the checkbox (guarded out) toggles the whole area on/off.
+        header.onclick = event => {
+            if (event.target === toggle) {
+                return;
+            }
+
+            container.classList.toggle('mcs-collapsed');
+        };
+
+        header.append(toggle, name_, caret);
         container.append(header);
         body.append(container);
 
@@ -534,6 +545,11 @@ export class TargetSelection extends HTMLElement {
                 }
 
                 group.container.style.display = groupVisible ? '' : 'none';
+
+                // When searching, un-collapse areas that contain matches so they are visible.
+                if (this._search && groupVisible) {
+                    group.container.classList.remove('mcs-collapsed');
+                }
 
                 if (groupVisible) {
                     categoryVisible = true;
