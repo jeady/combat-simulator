@@ -33,7 +33,7 @@ export abstract class Main {
                     data.batches
                 );
 
-                return { monsterId: data.monsterId, entityId: data.entityId, result, batchResults, time: performance.now() - start };
+                return { monsterId: data.monsterId, entityId: data.entityId, onTask: data.onTask, result, batchResults, time: performance.now() - start };
             }
 
             const result = await Global.simulator.simulateMonster(
@@ -45,7 +45,7 @@ export abstract class Main {
                 data.deathAbortThreshold
             );
 
-            return { monsterId: data.monsterId, entityId: data.entityId, result, time: performance.now() - start };
+            return { monsterId: data.monsterId, entityId: data.entityId, onTask: data.onTask, result, time: performance.now() - start };
         });
 
         Global.transport.on(MessageAction.Cancel, async () => Global.simulator.cancelSimulation());

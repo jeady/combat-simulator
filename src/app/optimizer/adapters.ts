@@ -379,11 +379,14 @@ export class GameScorer implements Scorer {
             // z-gate inert for slayer/dungeon targets — metric-plateau slots then swapped on pure
             // noise (any lucky delta cleared the margin-0/relative-floor accept test).
             const batches = this.resolveBatches(trials);
-            const saveString = Global.game.generateSaveStringSimple();
+            // Slayer-task aggregates must sim on-task so the score matches the Simulate chart; the flag
+            // is baked into the save string (see `saveStringForOnTask`) and echoed on each request.
+            const saveString = this.saveStringForOnTask(isSlayerTask);
             const requests: SimulateRequest[] = uniqueMonsters.map(monster => ({
                 saveString,
                 monsterId: monster.id,
                 entityId: simEntityId as string,
+                onTask: isSlayerTask,
                 trials,
                 maxTicks: ticks,
                 deathAbortThreshold,
@@ -459,7 +462,15 @@ export class GameScorer implements Scorer {
         const dataByMonster = new Map<string, SimulationData>();
         let anySuccess = false;
         for (const monster of uniqueMonsters) {
-            const datas = await this.runSim(monster.id, simEntityId, trials, ticks, deathAbortThreshold);
+            const datas = await this.runSim(
+                monster.id,
+                simEntityId,
+                trials,
+                ticks,
+                deathAbortThreshold,
+                1,
+                isSlayerTask
+            );
             const data = datas?.[0];
             if (data) {
                 anySuccess = true;
@@ -495,6 +506,28 @@ export class GameScorer implements Scorer {
     }
 
     /**
+     * Serialize the current sim world with the "On Slayer Task" flag forced to `onTask`, restoring
+     * the player's previous value afterward. A slayer-task target must be scored on-task (the Simulate
+     * chart sims each task monster with `player.isSlayerTask = true`), so its save strings must bake
+     * the flag in — the optimizer's score only matches the chart if the worker fights on-task. The
+     * flag is toggled around a synchronous generate call only (no await between set and restore).
+     */
+    private saveStringForOnTask(onTask: boolean | undefined): string {
+        // undefined => leave the flag as the imported setup set it (plain single-monster / dungeon
+        // targets keep their historical behavior — the setup's own On-Slayer-Task value is used).
+        if (onTask === undefined) {
+            return Global.game.generateSaveStringSimple();
+        }
+        const previous = Global.game.combat.player.isSlayerTask;
+        Global.game.combat.player.isSlayerTask = onTask;
+        try {
+            return Global.game.generateSaveStringSimple();
+        } finally {
+            Global.game.combat.player.isSlayerTask = previous;
+        }
+    }
+
+    /**
      * Run one real simulation for a single monster and return its data, or `undefined` if the sim
      * threw or didn't succeed. The worker's own failure reason (e.g. "Simulated 0/200 trials" =>
      * not killed within the tick budget, "cannot access area", a realm/entityId mismatch, …) is
@@ -506,9 +539,13 @@ export class GameScorer implements Scorer {
         trials: number,
         ticks: number,
         deathAbortThreshold?: number,
-        batches = 1
+        batches = 1,
+        onTask: boolean | undefined = undefined
     ): Promise<SimulationData[] | undefined> {
-        const saveString = Global.game.generateSaveStringSimple();
+        const saveString = this.saveStringForOnTask(onTask);
+        // Echo the flag actually baked into the save string so the result would key correctly if it
+        // were stored: forced value when given, else the current (imported-setup) player flag.
+        const effectiveOnTask = onTask ?? Global.game.combat.player.isSlayerTask;
 
         let response: SimulateResponse;
         try {
@@ -518,6 +555,7 @@ export class GameScorer implements Scorer {
                 // Must be undefined (not '') for a plain monster — the worker resolves a combat
                 // area from a non-undefined entityId and throws on '', failing every sim.
                 entityId: entityId as string,
+                onTask: effectiveOnTask,
                 trials,
                 maxTicks: ticks,
                 deathAbortThreshold,
@@ -615,6 +653,8 @@ export class GameScorer implements Scorer {
                 saveString: Global.game.generateSaveStringSimple(),
                 monsterId: target.monsterId,
                 entityId: target.entityId as string,
+                // Plain single-monster target: keep the imported setup's own on-task flag.
+                onTask: Global.game.combat.player.isSlayerTask,
                 trials,
                 maxTicks: ticks,
                 deathAbortThreshold,
