@@ -32,9 +32,12 @@ export abstract class Drops {
     }
 
     public static updateDropChance() {
-        // Set data for monsters in combat zones
+        // Set data for monsters in combat zones (toggle-aware variant — matches the plain-bar reads)
         for (const monsterId of Global.stores.game.state.monsterIds) {
-            const data = Global.simulation.monsterSimData[monsterId];
+            const data =
+                Global.simulation.monsterSimData[
+                    Global.simulation.simId(monsterId, undefined, Global.game.combat.player.isSlayerTask)
+                ];
 
             data.dropChance = this.getMonsterDropChance(monsterId, data);
         }
@@ -117,7 +120,9 @@ export abstract class Drops {
             data.dropChance = this.getMonsterListAverageDropRate(
                 PlotKey.Drops,
                 Global.simulation.slayerSimData[taskId],
-                Global.simulation.slayerTaskMonsters[taskId]
+                Global.simulation.slayerTaskMonsters[taskId],
+                undefined,
+                true
             );
         }
     }
@@ -137,9 +142,12 @@ export abstract class Drops {
                 this.setGpPerSecond(data, () => this.computeDungeonMonsterValue(monster.id));
             }
         } else {
-            // Regular monsters
+            // Regular monsters (toggle-aware variant)
             for (const monsterId of Global.stores.game.state.monsterIds) {
-                const data = Global.simulation.monsterSimData[monsterId];
+                const data =
+                    Global.simulation.monsterSimData[
+                        Global.simulation.simId(monsterId, undefined, Global.game.combat.player.isSlayerTask)
+                    ];
 
                 if (!data) {
                     continue;
@@ -196,13 +204,17 @@ export abstract class Drops {
                 data.gpPerSecondMelvor = this.getMonsterListAverageDropRate(
                     `${PlotKey.GP}Melvor` as PlotKey,
                     data,
-                    Global.simulation.slayerTaskMonsters[taskId]
+                    Global.simulation.slayerTaskMonsters[taskId],
+                    undefined,
+                    true
                 );
 
                 data.gpPerSecondAbyssal = this.getMonsterListAverageDropRate(
                     `${PlotKey.GP}Abyssal` as PlotKey,
                     data,
-                    Global.simulation.slayerTaskMonsters[taskId]
+                    Global.simulation.slayerTaskMonsters[taskId],
+                    undefined,
+                    true
                 );
             }
         }
@@ -240,9 +252,12 @@ export abstract class Drops {
                 data.signetChance = 0;
             }
         } else {
-            // Set data for monsters in combat zones
+            // Set data for monsters in combat zones (toggle-aware variant)
             for (const monsterId of Global.stores.game.state.monsterIds) {
-                const data = Global.simulation.monsterSimData[monsterId];
+                const data =
+                    Global.simulation.monsterSimData[
+                        Global.simulation.simId(monsterId, undefined, Global.game.combat.player.isSlayerTask)
+                    ];
 
                 if (!data) {
                     continue;
@@ -333,7 +348,7 @@ export abstract class Drops {
                 let signetChance = 0;
 
                 for (const monster of monsters) {
-                    const data = Global.simulation.monsterSimData[monster.id];
+                    const data = Global.simulation.monsterSimData[Global.simulation.simId(monster.id, undefined, true)];
 
                     if (!data) {
                         continue;
@@ -516,7 +531,7 @@ export abstract class Drops {
             let chanceForPet = 0;
 
             for (const monster of Global.simulation.slayerTaskMonsters[task.id]) {
-                const data = Global.simulation.monsterSimData[monster.id];
+                const data = Global.simulation.monsterSimData[Global.simulation.simId(monster.id, undefined, true)];
 
                 if (!data?.simSuccess) {
                     continue;
@@ -582,7 +597,10 @@ export abstract class Drops {
                 continue;
             }
 
-            const monster = Lookup.monsters.getObjectByID(simId);
+            // Resolve the underlying monster for both plain and on-task (`task@<id>`) variant keys so
+            // the on-task per-monster entries (read by task inspect bars) also get their markChance.
+            const monsterId = simId.startsWith('task@') ? simId.slice('task@'.length) : simId;
+            const monster = Lookup.monsters.getObjectByID(monsterId);
 
             if (!monster) {
                 continue;
@@ -634,7 +652,7 @@ export abstract class Drops {
             let chanceForMark = 0;
 
             for (const monster of Global.simulation.slayerTaskMonsters[task]) {
-                const data = Global.simulation.monsterSimData[monster.id];
+                const data = Global.simulation.monsterSimData[Global.simulation.simId(monster.id, undefined, true)];
 
                 if (!data?.simSuccess) {
                     continue;
@@ -1234,7 +1252,8 @@ export abstract class Drops {
         key: PlotKey,
         data: SimulationData,
         monsters: Monster[],
-        dungeonId: string = undefined
+        dungeonId: string = undefined,
+        onTask = false
     ) {
         if (!data) {
             return;
@@ -1244,7 +1263,9 @@ export abstract class Drops {
         let killTime = 0;
 
         for (const monster of monsters) {
-            const simId = Global.simulation.simId(monster.id, dungeonId);
+            // Slayer-task aggregates pass onTask=true (dungeonId undefined) to read the `task@`
+            // variant; dungeon/stronghold aggregates pass dungeonId, which takes precedence.
+            const simId = Global.simulation.simId(monster.id, dungeonId, onTask);
             const monsterData = Global.simulation.monsterSimData[simId];
 
             if (!monsterData?.simSuccess) {

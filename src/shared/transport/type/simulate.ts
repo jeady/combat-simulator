@@ -4,6 +4,14 @@ export interface SimulateRequest {
     saveString: string;
     monsterId: string;
     entityId: string;
+    /**
+     * Whether this sim ran with the "On Slayer Task" flag applied (baked into `saveString` via
+     * `player.isSlayerTask`). Echoed back in {@link SimulateResponse.onTask} so the app stores the
+     * result under the correct variant key (`simId(monsterId, entityId, onTask)`) — an on-task and an
+     * off-task sim of the same plain monster must not overwrite each other. Optional/undefined =>
+     * off-task (unchanged behavior for existing callers).
+     */
+    onTask?: boolean;
     trials: number;
     maxTicks: number;
     /**
@@ -27,6 +35,8 @@ export interface SimulateRequest {
 export interface SimulateResponse {
     monsterId: string;
     entityId: string;
+    /** Echo of {@link SimulateRequest.onTask}; selects the variant result key the app stores to. */
+    onTask?: boolean;
     result: SimulationResult | Result;
     /**
      * Per-batch sub-results when {@link SimulateRequest.batches} > 1 (one entry per sub-run over the

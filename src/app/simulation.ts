@@ -1,4 +1,5 @@
 import { SimulateRequest, SimulateResponse } from 'src/shared/transport/type/simulate';
+import { simKey } from './sim-key';
 import { Simulator } from './worker/simulator';
 import { SimulationResult, SimulationStats } from 'src/shared/simulator/sim-manager';
 import { Global } from './global';
@@ -72,6 +73,15 @@ export class Simulation {
             this.monsterSimData[monster.id] = this.newSimDataEntry(true);
             this.monsterSimIds.push(monster.id);
             this.monsterSimFilter[monster.id] = true;
+
+            // The on-task variant of every monster's plain sim (see `simId`). Created for ALL
+            // monsters (not just canSlayer ones) because a plain-monster bar read becomes
+            // toggle-aware: when the global "On Slayer Task" flag is on, those reads resolve to the
+            // `task@` key regardless of whether the monster can actually be a slayer task. Also
+            // covers `resetSimulation`, which re-inits every existing key.
+            const taskId = this.simId(monster.id, undefined, true);
+            this.monsterSimData[taskId] = this.newSimDataEntry(true);
+            this.monsterSimIds.push(taskId);
         }
 
         for (const dungeon of Lookup.combatAreas.dungeons) {
@@ -150,12 +160,8 @@ export class Simulation {
         return data;
     }
 
-    public simId(monsterId: string, entityId?: string) {
-        if (entityId === undefined) {
-            return monsterId;
-        }
-
-        return `${entityId}-${monsterId}`;
+    public simId(monsterId: string, entityId?: string, onTask = false) {
+        return simKey(monsterId, entityId, onTask);
     }
 
     public getSimFailureText(data: SimulationData, includeHints = false) {
@@ -214,7 +220,14 @@ export class Simulation {
         if (!Global.stores.plotter.state.isInspecting) {
             // Compile data from monsters in combat zones
             for (const monsterId of Global.stores.game.state.monsterIds) {
-                dataSet.push(this.getBarValue(this.monsterSimFilter[monsterId], this.monsterSimData[monsterId]));
+                dataSet.push(
+                    this.getBarValue(
+                        this.monsterSimFilter[monsterId],
+                        this.monsterSimData[
+                            this.simId(monsterId, undefined, Global.game.combat.player.isSlayerTask)
+                        ]
+                    )
+                );
             }
 
             // Perform simulation of monsters in dungeons
@@ -262,10 +275,10 @@ export class Simulation {
                 dataSet[dataSet.length - 1] = this.getBarValue(true, this.monsterSimData[simId]);
             }
         } else if (Global.stores.plotter.state.inspectedId) {
-            // slayer tasks
+            // slayer tasks — task-monster inspect bars always read the on-task variant.
             for (const monster of Lookup.getSlayerTaskMonsters(Global.stores.plotter.state.inspectedId)) {
                 if (!isSignet) {
-                    dataSet.push(this.getBarValue(true, this.monsterSimData[monster.id]));
+                    dataSet.push(this.getBarValue(true, this.monsterSimData[this.simId(monster.id, undefined, true)]));
                 } else {
                     dataSet.push(0);
                 }
@@ -279,9 +292,11 @@ export class Simulation {
         const dataSet: SimulationData[] = [];
 
         if (!Global.stores.plotter.state.isInspecting) {
-            // Compile data from monsters in combat zones
+            // Compile data from monsters in combat zones (toggle-aware variant)
             for (const monsterId of Global.stores.game.state.monsterIds) {
-                dataSet.push(this.monsterSimData[monsterId]);
+                dataSet.push(
+                    this.monsterSimData[this.simId(monsterId, undefined, Global.game.combat.player.isSlayerTask)]
+                );
             }
 
             // Perform simulation of monsters in dungeons
@@ -315,7 +330,7 @@ export class Simulation {
             }
         } else if (Global.stores.plotter.state.inspectedId) {
             for (const monster of Lookup.getSlayerTaskMonsters(Global.stores.plotter.state.inspectedId)) {
-                dataSet.push(this.monsterSimData[monster.id]);
+                dataSet.push(this.monsterSimData[this.simId(monster.id, undefined, true)]);
             }
         }
 
@@ -480,9 +495,15 @@ export class Simulation {
                     area instanceof SlayerArea
                 )
             ) {
+                // These are plain-monster sims queued (below) with the global toggle's on-task flag,
+                // so the inQueue check and reason write must target the same toggle-aware variant.
                 const tryToSim = area.monsters.reduce(
                     (sim, monster) =>
-                        (this.monsterSimFilter[monster.id] && !this.monsterSimData[monster.id].inQueue) || sim,
+                        (this.monsterSimFilter[monster.id] &&
+                            !this.monsterSimData[
+                                this.simId(monster.id, undefined, Global.game.combat.player.isSlayerTask)
+                            ].inQueue) ||
+                        sim,
                     false
                 );
 
@@ -490,7 +511,9 @@ export class Simulation {
                     someAreaNotSimulated = true;
 
                     for (const monster of area.monsters) {
-                        this.monsterSimData[monster.id].reason = 'cannot access area';
+                        this.monsterSimData[
+                            this.simId(monster.id, undefined, Global.game.combat.player.isSlayerTask)
+                        ].reason = 'cannot access area';
                     }
                 }
 
@@ -734,7 +757,11 @@ export class Simulation {
         entityId?: string,
         onTask: boolean = Global.game.combat.player.isSlayerTask
     ) {
-        const simId = this.simId(monsterId, entityId);
+        // Key the queue entry by the actual sim condition: on-task and off-task variants of a plain
+        // monster get distinct `task@`/plain keys and are both queueable in one run, while identical
+        // variants still dedup. (When the global toggle is on, a plain-monster sim and a slayer-task
+        // sim of the same monster share the `task@` key, preserving compute-sharing.)
+        const simId = this.simId(monsterId, entityId, onTask);
 
         if (!this.monsterSimData[simId].inQueue) {
             this.monsterSimData[simId].inQueue = true;
@@ -784,7 +811,9 @@ export class Simulation {
             // A non-slayer monster records no reason (it's simply never a task monster); every other
             // rejection records why, exactly as the original per-branch handling did.
             if (monster.canSlayer) {
-                this.monsterSimData[monster.id].reason = access;
+                // Route the rejection reason to the on-task variant — this is the entry the task
+                // aggregate (compute, isSlayerTask) reads and combines.
+                this.monsterSimData[this.simId(monster.id, undefined, true)].reason = access;
             }
             return false;
         }
@@ -893,10 +922,11 @@ export class Simulation {
         if (this.current < this.queue.length && !Global.cancelStatus) {
             const monsterId = this.queue[this.current].monsterId;
             const entityId = this.queue[this.current].entityId;
+            const onTask = this.queue[this.current].onTask;
             // Apply this queue item's on-task flag before serializing so the worker
             // receives the correct value. Slayer-task items are on-task, dungeon/
             // stronghold/depth items are off-task, plain monsters follow the user toggle.
-            Global.game.combat.player.isSlayerTask = this.queue[this.current].onTask;
+            Global.game.combat.player.isSlayerTask = onTask;
             const saveString = Global.game.generateSaveStringSimple();
 
             this.current++;
@@ -904,6 +934,7 @@ export class Simulation {
             const response = await Global.simulation.simulate({
                 monsterId: monsterId,
                 entityId: entityId,
+                onTask: onTask,
                 saveString: saveString,
                 trials: Global.stores.simulator.state.trials,
                 maxTicks: Global.stores.simulator.state.ticks
@@ -913,7 +944,9 @@ export class Simulation {
                 this.error = response.result.stack;
             }
 
-            const simId = this.simId(response.monsterId, response.entityId);
+            // Store to the variant key matching the sim condition, so an on-task and an off-task sim
+            // of the same plain monster land in separate entries instead of overwriting each other.
+            const simId = this.simId(response.monsterId, response.entityId, response.onTask);
             Object.assign(this.monsterSimData[simId], response.result, {
                 monsterId: response.monsterId,
                 entityId: response.entityId
@@ -1027,7 +1060,10 @@ export class Simulation {
             monsters,
             isSlayerTask,
             entityId,
-            monster => this.monsterSimData[this.simId(monster.id, isSlayerTask ? undefined : entityId)]
+            monster =>
+                this.monsterSimData[
+                    this.simId(monster.id, isSlayerTask ? undefined : entityId, isSlayerTask)
+                ]
         );
     }
 

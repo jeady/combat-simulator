@@ -435,11 +435,19 @@ export class Information extends HTMLElement {
                 entityId = Lookup.getEntity(Global.stores.plotter.state.inspectedId)?.id;
             }
 
+            // entityId is set only for dungeon/stronghold/depth inspect. Otherwise this is either a
+            // plain-monster bar (read the toggle-aware variant) or a slayer-task-monster inspect
+            // (always on-task). onTask is ignored when entityId is present.
+            const onTask =
+                entityId === undefined &&
+                (Lookup.isSlayerTask(Global.stores.plotter.state.inspectedId) ||
+                    Global.game.combat.player.isSlayerTask);
+
             return {
                 title: Format.replaceApostrophe(monster.name),
                 media: monster.media,
                 combatStyle: monster.attackType,
-                data: Global.simulation.monsterSimData[Global.simulation.simId(monster.id, entityId)]
+                data: Global.simulation.monsterSimData[Global.simulation.simId(monster.id, entityId, onTask)]
             };
         }
 
@@ -491,8 +499,9 @@ export class Information extends HTMLElement {
         let isNearDeath = data.highestDamageTaken >= data.lowestHitpoints;
 
         if (monsters) {
+            // `monsters` is only passed for a slayer-task aggregate, so read the on-task variant.
             const monsterData = monsters.map((monster: Monster) => {
-                const id = Global.simulation.simId(monster.id);
+                const id = Global.simulation.simId(monster.id, undefined, true);
 
                 return Global.simulation.monsterSimData[id];
             });
