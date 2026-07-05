@@ -2,6 +2,8 @@ import './version.scss';
 import { LoadTemplate } from 'src/app/user-interface/template';
 import { Global } from 'src/app/global';
 
+declare const __MCS_VERSION__: string;
+
 declare global {
     interface HTMLElementTagNameMap {
         'mcs-header-version': Version;
@@ -32,7 +34,9 @@ export class Version extends HTMLElement {
     }
 
     public connectedCallback() {
-        this._version.innerText = `v${Global.context.version}`;
+        // context.version is supplied by mod.io for published mods; sideloaded/dev builds
+        // don't have it, so fall back to the package version baked in at build time.
+        this._version.innerText = `v${Global.context.version ?? __MCS_VERSION__}`;
 
         this.appendChild(this._content);
     }

@@ -22,7 +22,8 @@ export enum PageId {
     Settings = 'mcs-settings',
     Summary = 'mcs-summary',
     Modifiers = 'mcs-modifiers',
-    AutoOptimize = 'mcs-auto-optimize'
+    AutoOptimize = 'mcs-auto-optimize',
+    About = 'mcs-about'
 }
 
 type Callback = (pageId: PageId) => void;
@@ -87,7 +88,8 @@ export abstract class PageController {
         const mainContainer = document.getElementById('mcs-combat-simulator');
 
         switch (pageId) {
-            case PageId.AutoOptimize: {
+            case PageId.AutoOptimize:
+            case PageId.About: {
                 // Top-level sidebar button only (no header tab), so highlight just the sidebar entry.
                 mainContainer.querySelector(`.${pageId}-sidebar`)?.classList.toggle('is-highlight', toggle);
                 break;

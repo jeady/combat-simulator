@@ -20,6 +20,7 @@ export class Sidebar extends HTMLElement {
     private readonly _summary: HTMLButtonElement;
     private readonly _modifiers: HTMLButtonElement;
     private readonly _foundABug: HTMLButtonElement;
+    private readonly _about: HTMLButtonElement;
 
     constructor() {
         super();
@@ -33,6 +34,7 @@ export class Sidebar extends HTMLElement {
         this._summary = getElementFromFragment(this._content, 'mcs-summary-sidebar', 'button');
         this._modifiers = getElementFromFragment(this._content, 'mcs-modifiers-sidebar', 'button');
         this._foundABug = getElementFromFragment(this._content, 'mcs-found-a-bug-sidebar', 'button');
+        this._about = getElementFromFragment(this._content, 'mcs-about-sidebar', 'button');
     }
 
     public connectedCallback() {
@@ -52,6 +54,7 @@ export class Sidebar extends HTMLElement {
         this._summary.onclick = () => PageController.goTo(PageId.Summary);
         this._modifiers.onclick = () => PageController.goTo(PageId.Modifiers);
         this._foundABug.onclick = () => Bugs.report(true);
+        this._about.onclick = () => PageController.goTo(PageId.About);
     }
 }
 

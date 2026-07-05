@@ -29,7 +29,10 @@ const config: Configuration = {
         maxAssetSize: 512000
     },
     plugins: [
-        new DefinePlugin({ __MCS_BUILD__: JSON.stringify(buildStamp) }),
+        new DefinePlugin({
+            __MCS_BUILD__: JSON.stringify(buildStamp),
+            __MCS_VERSION__: JSON.stringify(process.env.npm_package_version || '?')
+        }),
         new CopyPlugin({
             patterns: [
                 { from: '**/*.html', to: '[path][name][ext]', context: 'src', noErrorOnMissing: true },

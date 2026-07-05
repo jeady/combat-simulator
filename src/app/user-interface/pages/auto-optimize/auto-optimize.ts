@@ -46,10 +46,6 @@ import { EquipmentController } from 'src/app/user-interface/pages/_parts/equipme
 import { ImageLoader } from 'src/app/utils/image-loader';
 import { Lookup } from 'src/shared/utils/lookup';
 
-// Injected at build time by webpack DefinePlugin (see webpack.config.ts) so the page can show which
-// build is actually loaded — the surest way to confirm a freshly built modfile took effect.
-declare const __MCS_BUILD__: string;
-
 declare global {
     interface HTMLElementTagNameMap {
         'mcs-auto-optimize': AutoOptimizePage;
@@ -124,7 +120,6 @@ export class AutoOptimizePage extends HTMLElement {
     private readonly _status: HTMLDivElement;
     private readonly _progress: HTMLDivElement;
     private readonly _results: HTMLDivElement;
-    private readonly _build: HTMLDivElement;
 
     private readonly _locks: HTMLDivElement;
     private readonly _searchAll: HTMLButtonElement;
@@ -242,7 +237,6 @@ export class AutoOptimizePage extends HTMLElement {
         this._status = getElementFromFragment(this._content, 'mcs-auto-optimize-status', 'div');
         this._progress = getElementFromFragment(this._content, 'mcs-auto-optimize-progress', 'div');
         this._results = getElementFromFragment(this._content, 'mcs-auto-optimize-results', 'div');
-        this._build = getElementFromFragment(this._content, 'mcs-auto-optimize-build', 'div');
 
         this._locks = getElementFromFragment(this._content, 'mcs-auto-optimize-locks', 'div');
         this._searchAll = getElementFromFragment(this._content, 'mcs-auto-optimize-search-all', 'button');
@@ -289,10 +283,6 @@ export class AutoOptimizePage extends HTMLElement {
 
     public connectedCallback() {
         this.appendChild(this._content);
-
-        // __MCS_BUILD__ is a build-time literal (webpack DefinePlugin) — no runtime Global access, so
-        // this is safe even though connectedCallback can run during setup before Global.context exists.
-        this._build.textContent = `Build: ${__MCS_BUILD__}`;
 
         this._searchTrials.value = String(Global.stores.optimizer.state.searchTrials);
         this._fastSearch.checked = Global.stores.optimizer.state.fastSearch;
