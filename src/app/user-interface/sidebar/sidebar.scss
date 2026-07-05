@@ -34,7 +34,8 @@ mcs-sidebar {
 
 .mcs-auto-optimize-sidebar,
 .mcs-found-a-bug-sidebar,
-.mcs-found-a-bug-header {
+.mcs-found-a-bug-header,
+.mcs-about-sidebar {
     i {
         height: 44px;
         width: 44px;
@@ -60,7 +61,8 @@ mcs-sidebar {
         }
 
         .mcs-navigation-button.mcs-found-a-bug-sidebar i,
-        .mcs-navigation-button.mcs-auto-optimize-sidebar i {
+        .mcs-navigation-button.mcs-auto-optimize-sidebar i,
+        .mcs-navigation-button.mcs-about-sidebar i {
             display: flex;
         }
     }
