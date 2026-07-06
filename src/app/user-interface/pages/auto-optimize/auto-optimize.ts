@@ -152,6 +152,26 @@ export class AutoOptimizePage extends HTMLElement {
     private _cancel?: CancelToken;
     private _result?: OptimizeResult;
 
+    /**
+     * The applier/scorer/target/options of the LAST COMPLETED run, retained so the "Explain changes"
+     * button can re-run the leave-one-out loop after `_onRun` has returned (its locals are gone). The
+     * applier/scorer operate on the live sim world via snapshots, so they still work later — the
+     * scorer holds the reused pool, which stays alive across runs. Invalidated when a new run starts
+     * and on disconnectedCallback.
+     */
+    private _lastRun?: {
+        applier: GameLoadoutApplier;
+        scorer: MemoizingScorer;
+        target: OptimizeTarget;
+        runOptions: Partial<OptimizeOptions>;
+    };
+    /** True once per-change attribution has already been rendered for the current result (auto or manual). */
+    private _attributionDone = false;
+    /** Explain-changes button, added to the results panel when a run leaves 1..12 unexplained changes. */
+    private _explainButton?: HTMLButtonElement;
+    /** Cancellation token for an in-flight attribution pass (separate from the search's `_cancel`). */
+    private _analysisCancel?: CancelToken;
+
     /** Reused pool of parallel sim workers (built lazily; rebuilt when the worker count changes). */
     private _pool?: WorkerPool;
     private _poolSize = 0;
@@ -266,6 +286,12 @@ export class AutoOptimizePage extends HTMLElement {
     }
 
     public disconnectedCallback() {
+        // Abort a running "Explain changes" pass and drop the retained run context — its scorer holds
+        // the pool we're about to tear down, so it must not be reused after this point.
+        if (this._analysisCancel) {
+            this._analysisCancel.cancelled = true;
+        }
+        this._lastRun = undefined;
         // Free the pool's workers if the page element is ever torn down (the base single worker,
         // owned by Global.simulation, is unaffected), and cancel any pending live-view repaint.
         this._teardownPool();
@@ -640,6 +666,10 @@ export class AutoOptimizePage extends HTMLElement {
         this._runScreenKeep = 3;
         this._refreshObjective();
         this._result = undefined;
+        // A new run invalidates the previous run's retained context + any rendered attribution.
+        this._lastRun = undefined;
+        this._attributionDone = false;
+        this._explainButton = undefined;
         this._apply.disabled = true;
         this._results.innerHTML = '';
         this._progress.textContent = '';
@@ -791,12 +821,18 @@ export class AutoOptimizePage extends HTMLElement {
             }
             this._result = result;
             Global.stores.optimizer.set({ result });
+            // Retain this run's context so the "Explain changes" button can re-run the leave-one-out
+            // loop later (its applier/scorer operate on the live sim world, and the scorer holds the
+            // reused pool). Set before _renderResult so it can wire the button.
+            this._lastRun = { applier, scorer, target, runOptions };
             this._renderResult(result);
-            // When the winner still shows deaths at full fidelity, attribute the risk: re-sim the
-            // best setup with each gear change individually reverted, so the user can see WHICH slot
-            // carries the danger instead of guessing across the whole diff.
+            // When the winner still shows deaths at full fidelity, attribute the risk automatically:
+            // re-sim the best setup with each gear change individually reverted, so the user can see
+            // WHICH slot carries the danger instead of guessing across the whole diff. The same
+            // leave-one-out data also answers "which changes mattered?", so this run doubles as the
+            // per-change breakdown — the "Explain changes" button covers the no-death case.
             if (result.improved && result.bestDeathRate > 0 && !cancel.cancelled) {
-                await this._analyzeRisk(result, applier, scorer, target, runOptions, cancel);
+                await this._runAttribution('death', result, applier, scorer, target, runOptions, cancel);
             }
         } catch (error) {
             this._status.textContent = `Optimization failed: ${(error as Error)?.message ?? String(error)}`;
@@ -1413,7 +1449,77 @@ export class AutoOptimizePage extends HTMLElement {
         html += `<div class="text-muted">${result.evaluations} simulations run.</div>`;
         this._results.innerHTML = html;
         this._apply.disabled = !result.improved;
+        this._maybeAddExplainButton(result);
         this._showBestSetup(result);
+    }
+
+    /**
+     * Offer the "Explain changes" button when a run improved with a tractable number of REVERTIBLE
+     * changes (1..12, the cap the leave-one-out loop can afford) AND per-change attribution hasn't
+     * already run. The automatic death-risk pass renders the same per-change data, so when it will fire
+     * (bestDeathRate > 0) we skip the button — that section already answers "which changes mattered".
+     * The count is `_attributableChanges` (gear/consumable dims only), NOT dimensionDiff.length, so a
+     * result whose only changes are progression-pass ones (which can't be reverted here) shows no button.
+     */
+    private _maybeAddExplainButton(result: OptimizeResult) {
+        this._explainButton = undefined;
+        const changeCount = this._attributableChanges().length;
+        if (!result.improved || this._attributionDone || result.bestDeathRate > 0 || changeCount < 1 || changeCount > 12) {
+            return;
+        }
+        const button = createElement('button', {
+            classList: ['mcs-button-secondary', 'mcs-auto-optimize-explain'],
+            text: 'Explain changes',
+            attributes: [['type', 'button']]
+        });
+        button.title = 'Re-sim the best setup with each change reverted one at a time to measure what each change contributes.';
+        button.onclick = () => this._onExplain();
+        this._results.appendChild(button);
+        this._explainButton = button;
+    }
+
+    /**
+     * "Explain changes" handler: re-run the leave-one-out loop on the last completed run, sorted by
+     * metric contribution (biggest first). Disables Run + the button while it works and toggles the
+     * button to a cancellable "Cancel" state. Restores the user's setup afterward (the attribution
+     * loop's own finally handles that). No-ops if the retained context is gone (a new run cleared it).
+     */
+    private async _onExplain() {
+        const run = this._lastRun;
+        const result = this._result;
+        if (!run || !result || this._analysisCancel) {
+            return;
+        }
+        const cancel: CancelToken = { cancelled: false };
+        this._analysisCancel = cancel;
+        this._run.disabled = true;
+        // Apply mutates the same sim world the attribution loop is snapshotting between evaluations, so
+        // freeze it while the pass is in flight; re-enable it after (the result is still applicable).
+        const applyWasEnabled = !this._apply.disabled;
+        this._apply.disabled = true;
+        const button = this._explainButton;
+        if (button) {
+            button.textContent = 'Cancel';
+            button.onclick = () => {
+                cancel.cancelled = true;
+                button.disabled = true;
+            };
+        }
+        try {
+            await this._runAttribution('explain', result, run.applier, run.scorer, run.target, run.runOptions, cancel);
+        } finally {
+            this._analysisCancel = undefined;
+            this._run.disabled = false;
+            this._apply.disabled = !applyWasEnabled;
+            // If the pass was cancelled before it rendered anything (no rows), _renderAttribution never
+            // ran, so the button is still ours — reset it from "Cancel" back to a clickable "Explain
+            // changes" so the user can retry. If it did render, _renderAttribution removed the button.
+            if (this._explainButton === button && button && !this._attributionDone) {
+                button.textContent = 'Explain changes';
+                button.disabled = false;
+                button.onclick = () => this._onExplain();
+            }
+        }
     }
 
     /**
@@ -1470,24 +1576,16 @@ export class AutoOptimizePage extends HTMLElement {
     }
 
     /**
-     * Attribute the winner's residual death risk to individual changes: re-sim the best setup with
-     * each changed dimension reverted to the user's original choice — full trials, cache-bypassing,
-     * and NO death-abort (measure, don't race). The change whose reversal removes the most death
-     * rate is the one poisoning the loadout; the metric column shows what reverting would cost.
-     * Progression-pass changes (agility/cartography) aren't dimensions of this run and are skipped.
+     * The `_runDims` indices whose best choice differs from the baseline — the changes the leave-one-out
+     * loop can actually revert. This is NOT `dimensionDiff.length`: the staged progression pass appends
+     * agility/cartography changes to `dimensionDiff` that aren't dimensions of this run, so they can't be
+     * reverted here. Returns [] when the best/baseline choices aren't available (e.g. the run failed).
      */
-    private async _analyzeRisk(
-        result: OptimizeResult,
-        applier: GameLoadoutApplier,
-        scorer: MemoizingScorer,
-        target: OptimizeTarget,
-        runOptions: Partial<OptimizeOptions>,
-        cancel: CancelToken
-    ) {
+    private _attributableChanges(): number[] {
         const bestChoices = this._bestEvent?.choices;
         const baseChoices = this._baselineChoices;
         if (!bestChoices || !baseChoices) {
-            return;
+            return [];
         }
         const changed: number[] = [];
         for (let i = 0; i < this._runDims.length; i++) {
@@ -1495,14 +1593,42 @@ export class AutoOptimizePage extends HTMLElement {
                 changed.push(i);
             }
         }
-        // Nothing to attribute, or too many changes to afford a full-fidelity eval for each.
-        if (changed.length === 0 || changed.length > 12) {
+        return changed;
+    }
+
+    /**
+     * Leave-one-out attribution: re-sim the best setup with each changed dimension reverted to the
+     * user's original choice — full trials, cache-bypassing, and NO death-abort (measure, don't race).
+     * The metric delta per reverted change IS that change's marginal contribution to the result, and
+     * the death-rate delta shows which change carries any residual risk. One loop, two framings:
+     *  - `'death'` (auto): fires when the winner still dies; sorted risky-first (lowest remaining death
+     *    rate leads), titled around the death risk. This is today's behavior, unchanged.
+     *  - `'explain'` (button): the manual "which changes mattered?" pass; sorted by metric contribution
+     *    descending (biggest contributor first).
+     * Both render through the one shared renderer. Progression-pass changes (agility/cartography)
+     * aren't dimensions of this run and are skipped. Streams a "i/N" status while it works.
+     */
+    private async _runAttribution(
+        mode: 'death' | 'explain',
+        result: OptimizeResult,
+        applier: GameLoadoutApplier,
+        scorer: MemoizingScorer,
+        target: OptimizeTarget,
+        runOptions: Partial<OptimizeOptions>,
+        cancel: CancelToken
+    ) {
+        const changed = this._attributableChanges();
+        const baseChoices = this._baselineChoices;
+        // Nothing to attribute, or too many changes to afford a full-fidelity eval for each. (The
+        // button gate already checks this, but the auto path calls in without one.)
+        if (!baseChoices || changed.length === 0 || changed.length > 12) {
             return;
         }
 
         const trials = runOptions.finalTrials ?? DEFAULT_OPTIONS.finalTrials;
         const ticks = runOptions.finalTicks ?? DEFAULT_OPTIONS.finalTicks;
-        this._status.textContent = 'Analyzing which changes carry the death risk…';
+        const statusPrefix =
+            mode === 'death' ? 'Analyzing which changes carry the death risk' : 'Analyzing which changes mattered';
 
         const rows: { label: string; without: Evaluation }[] = [];
         try {
@@ -1510,41 +1636,90 @@ export class AutoOptimizePage extends HTMLElement {
                 if (cancel.cancelled) {
                     break;
                 }
+                this._status.textContent = `${statusPrefix}… ${rows.length + 1}/${changed.length}`;
                 applier.restore(result.bestSetup);
                 this._runDims[i].applyChoice(baseChoices[i]);
                 const without = await scorer.evaluateFresh(target, trials, ticks);
                 rows.push({ label: this._runDims[i].label, without });
             }
         } finally {
+            // Always leave the user's setup as the run's finally left it (the run itself already
+            // restored it; this restores after our own reverts, on completion, cancel, or a throw).
             applier.restore(result.baselineSetup);
         }
         if (rows.length === 0) {
-            this._status.textContent = 'Done.';
+            this._status.textContent = cancel.cancelled ? 'Cancelled.' : 'Done.';
             return;
         }
 
-        // Risky-first: the reversal that leaves the LOWEST remaining death rate leads the list.
-        rows.sort((a, b) => (a.without.deathRate ?? 1) - (b.without.deathRate ?? 1));
-        let html = `<div class="mcs-auto-optimize-section-title">Death-risk attribution</div>`;
-        html +=
-            `<div class="text-muted">The best setup re-simmed with each change individually reverted ` +
-            `(${trials} trials each). A big death-rate drop means that slot carries the risk; ` +
-            `the metric figure is what reverting it costs.</div><ul>`;
+        this._renderAttribution(mode, result, rows, trials);
+        this._status.textContent = cancel.cancelled ? 'Cancelled — showing partial results.' : 'Done.';
+    }
+
+    /**
+     * Shared renderer for both attribution paths (§7.3). Each row is the best setup with one change
+     * reverted; we report per change: the metric contribution (what reverting costs, as an absolute
+     * value with unit and as a % of best), the death-rate delta, and the worst-hit delta where the
+     * scorer measured it. `mode` only picks the sort + framing; the row HTML is identical. Rendered by
+     * replacing any prior attribution section (an in-place re-render never stacks two lists) — the
+     * Explain button, if present, is consumed here so the button and its results don't coexist.
+     */
+    private _renderAttribution(
+        mode: 'death' | 'explain',
+        result: OptimizeResult,
+        rows: { label: string; without: Evaluation }[],
+        trials: number
+    ) {
+        const unit = this._metricUnit();
+        // Metric contribution of reverting a change = best − without (directed so "how much you'd lose"
+        // is positive for a genuine contributor, regardless of maximize/minimize).
+        const contribution = (row: { without: Evaluation }) =>
+            Number.isFinite(row.without.metric) ? this._directed(result.bestMetric) - this._directed(row.without.metric) : -Infinity;
+
+        if (mode === 'death') {
+            // Risky-first: the reversal that leaves the LOWEST remaining death rate leads the list.
+            rows.sort((a, b) => (a.without.deathRate ?? 1) - (b.without.deathRate ?? 1));
+        } else {
+            // Biggest contributor first: the change that costs the most metric to revert leads.
+            rows.sort((a, b) => contribution(b) - contribution(a));
+        }
+
+        const title = mode === 'death' ? 'Death-risk attribution' : 'What each change contributed';
+        const desc =
+            mode === 'death'
+                ? `The best setup re-simmed with each change individually reverted (${trials} trials each). ` +
+                  `A big death-rate drop means that slot carries the risk; the metric figure is what reverting it costs.`
+                : `The best setup re-simmed with each change individually reverted (${trials} trials each). ` +
+                  `The metric figure is that change's marginal contribution — what you'd lose by not making it.`;
+
+        let html = `<div class="mcs-auto-optimize-section-title">${title}</div>`;
+        html += `<div class="text-muted">${desc}</div><ul>`;
         for (const row of rows) {
-            const death = `${(result.bestDeathRate * 100).toFixed(2)}% &rarr; ${(row.without.deathRate * 100).toFixed(2)}%`;
-            const metricPct =
-                Number.isFinite(row.without.metric) && Number.isFinite(result.bestMetric) && result.bestMetric !== 0
-                    ? `${(((row.without.metric - result.bestMetric) / Math.abs(result.bestMetric)) * 100).toFixed(1)}%`
+            const delta = contribution(row);
+            const metricText =
+                Number.isFinite(delta) && Number.isFinite(result.bestMetric) && result.bestMetric !== 0
+                    ? `${this._format(Math.abs(delta))}${unit} (${((Math.abs(delta) / Math.abs(result.bestMetric)) * 100).toFixed(1)}%)`
                     : '—';
+            const death = `${(result.bestDeathRate * 100).toFixed(2)}% &rarr; ${(row.without.deathRate * 100).toFixed(2)}%`;
             const worstHit =
                 row.without.highestDamageTaken !== undefined && result.bestHighestDamageTaken !== undefined
                     ? ` · worst hit ${this._format(result.bestHighestDamageTaken)} &rarr; ${this._format(row.without.highestDamageTaken)}`
                     : '';
-            html += `<li><strong>${row.label}</strong> reverted: death ${death} · metric ${metricPct}${worstHit}</li>`;
+            html += `<li><strong>${row.label}</strong> reverted: metric ${metricText} · death ${death}${worstHit}</li>`;
         }
         html += `</ul>`;
-        this._results.insertAdjacentHTML('beforeend', html);
-        this._status.textContent = 'Done.';
+
+        // Replace any prior attribution section (so re-running the button doesn't stack lists) and drop
+        // the Explain button — its work is now shown inline.
+        this._attributionDone = true;
+        if (this._explainButton) {
+            this._explainButton.remove();
+            this._explainButton = undefined;
+        }
+        this._results.querySelector('.mcs-auto-optimize-attribution')?.remove();
+        const section = createElement('div', { classList: ['mcs-auto-optimize-attribution'] });
+        section.innerHTML = html;
+        this._results.appendChild(section);
     }
 
     private _itemName(itemId?: string): string {
