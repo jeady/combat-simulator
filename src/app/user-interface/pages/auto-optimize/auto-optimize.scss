@@ -173,6 +173,16 @@
     }
 }
 
+// "Explain changes" button + the per-change attribution section it (and the automatic death pass)
+// render into.
+.mcs-auto-optimize-explain {
+    margin-top: 0.5rem;
+}
+
+.mcs-auto-optimize-attribution {
+    margin-top: 0.5rem;
+}
+
 /* --- Search scope / lock panel --- */
 .mcs-auto-optimize-scope {
     summary {
