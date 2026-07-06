@@ -19,6 +19,7 @@ import {
     buildDimensions,
     dungeonTargetId,
     getSelectedTarget,
+    isDropsObjective,
     isSupportedObjective,
     isSupportedTarget,
     slayerTaskTargetId,
@@ -337,7 +338,7 @@ export class AutoOptimizePage extends HTMLElement {
         // plot.text already ends with "per" for time metrics (e.g. "XP per"), so only append the unit.
         const unit = plot.isTime ? ` ${Global.stores.plotter.timeShorthand}` : '';
         const direction = this._scorer.isMaximize() ? 'maximize' : 'minimize';
-        const supported = isSupportedObjective();
+        const supported = isSupportedObjective(target);
         const targetSupported = isSupportedTarget(target);
 
         // A setup "passes" the survival constraint by never dying across the (low) search-trial count,
@@ -602,15 +603,18 @@ export class AutoOptimizePage extends HTMLElement {
             return;
         }
 
-        if (!isSupportedObjective()) {
-            this._status.textContent =
-                "The selected plot metric isn't supported for auto-optimize yet. Choose Kills, an XP type, Death Rate, etc.";
-            return;
-        }
-
         const target = getSelectedTarget();
         if (!target) {
             this._status.textContent = 'No target selected. Open the Simulate page and select a monster first.';
+            return;
+        }
+
+        // Objective support is target-aware: Drops is supported for single-monster / slayer-task
+        // targets but not dungeon/stronghold/depth aggregates (see isSupportedObjective).
+        if (!isSupportedObjective(target)) {
+            this._status.textContent = isDropsObjective()
+                ? "Drops can't be auto-optimized for a dungeon/stronghold/depth aggregate (its drop rate comes from the area's reward table, not the per-monster average). Pick a single monster or a slayer task."
+                : "The selected plot metric isn't supported for auto-optimize yet. Choose Kills, an XP type, Death Rate, etc.";
             return;
         }
 

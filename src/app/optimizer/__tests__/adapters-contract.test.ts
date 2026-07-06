@@ -20,7 +20,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({
     game: undefined as any,
     melvor: undefined as any,
-    simulation: undefined as any
+    simulation: undefined as any,
+    // Current plot-metric key the mocked plotter store reports (drives isSupportedObjective /
+    // isMaximize / isDropsObjective). Default 'killsPerSecond' (a plain supported maximize metric).
+    plotKey: 'killsPerSecond' as string
 }));
 
 // Stub the two game-coupled modules the adapters import. Only the members the adapters actually read
@@ -36,8 +39,22 @@ vi.mock('src/app/global', () => ({
         get simulation() {
             return state.simulation;
         },
+        stores: {
+            plotter: {
+                get plotType() {
+                    return { key: state.plotKey };
+                }
+            }
+        },
         logger: { warn: () => {}, error: () => {}, info: () => {} }
     }
+}));
+
+// `Drops.getMonsterDropChance` is imported transitively by adapters.ts (for the scorer's per-result
+// drops fill). The scorer path itself is in-game-verify-only, but importing adapters.ts pulls the
+// whole game-coupled Drops module — stub it so the contract tests stay headless.
+vi.mock('src/app/drops', () => ({
+    Drops: { getMonsterDropChance: () => 0 }
 }));
 
 const isSlayerTaskMock = vi.hoisted(() => vi.fn((id: string | undefined) => false));
@@ -60,6 +77,8 @@ vi.mock('src/shared/utils/lookup', () => ({
 import {
     GameCandidateProvider,
     GameLoadoutApplier,
+    isDropsObjective,
+    isSupportedObjective,
     slayerTaskTargetId,
     dungeonTargetId,
     isSupportedTarget,
@@ -200,6 +219,7 @@ beforeEach(() => {
     state.game = undefined;
     state.melvor = undefined;
     state.simulation = undefined;
+    state.plotKey = 'killsPerSecond';
 });
 
 /**
@@ -745,6 +765,65 @@ describe('dungeonTargetId / aggregate isSupportedTarget', () => {
     it('a slayer-task target is never treated as a dungeon aggregate', () => {
         isSlayerTaskMock.mockImplementation(id => id === 'task:A');
         expect(dungeonTargetId({ monsterId: 'task:A' })).toBeUndefined();
+    });
+});
+
+/**
+ * Scope item R4 — objective support gating for the Drops metric. The Drops value is computable per
+ * simulation result (see adapters' fillDropChance), so it's a supported objective for single-monster
+ * and slayer-task targets, but NOT for dungeon/stronghold/depth aggregates (whose chart drop rate
+ * comes from a reward table, not the per-monster average). GP/pet/mark/signet stay unsupported.
+ * These read the mocked plotter store's plotType.key via `state.plotKey`.
+ */
+describe('isSupportedObjective / isDropsObjective (Drops)', () => {
+    // PlotKey enum string values used below: Drops='dropChance', GP='gpPerSecond', Kills='killsPerSecond'.
+    it('Drops is a supported objective (no longer in UNSUPPORTED_KEYS)', () => {
+        state.plotKey = 'dropChance';
+        // No target and a plain-monster target: supported.
+        expect(isSupportedObjective()).toBe(true);
+        expect(isSupportedObjective({ monsterId: 'melvorD:Rat' })).toBe(true);
+    });
+
+    it('GP / pet / mark / signet remain unsupported objectives', () => {
+        for (const key of ['gpPerSecond', 'petChance', 'markChance', 'signetChance']) {
+            state.plotKey = key;
+            expect(isSupportedObjective({ monsterId: 'melvorD:Rat' })).toBe(false);
+        }
+    });
+
+    it('Drops is supported for a slayer-task target (chart averages per-monster drop chances)', () => {
+        isSlayerTaskMock.mockImplementation(id => id === 'task:A');
+        state.plotKey = 'dropChance';
+        expect(isSupportedObjective({ monsterId: 'task:A' })).toBe(true);
+    });
+
+    it('Drops is REJECTED for dungeon/stronghold/depth aggregates (reward-table drop rate ≠ average)', () => {
+        state.plotKey = 'dropChance';
+
+        isDungeonMock.mockImplementation(id => id === 'dung:A');
+        expect(isSupportedObjective({ monsterId: 'dung:A' })).toBe(false);
+
+        isDungeonMock.mockReturnValue(false);
+        isStrongholdMock.mockImplementation(id => id === 'strong:A');
+        expect(isSupportedObjective({ monsterId: 'strong:A' })).toBe(false);
+
+        isStrongholdMock.mockReturnValue(false);
+        isDepthMock.mockImplementation(id => id === 'depth:A');
+        expect(isSupportedObjective({ monsterId: 'depth:A' })).toBe(false);
+    });
+
+    it('a non-Drops metric is NOT rejected for a dungeon aggregate', () => {
+        // The aggregate rejection is Drops-specific; Kills on a dungeon aggregate stays supported.
+        isDungeonMock.mockImplementation(id => id === 'dung:A');
+        state.plotKey = 'killsPerSecond';
+        expect(isSupportedObjective({ monsterId: 'dung:A' })).toBe(true);
+    });
+
+    it('isDropsObjective reflects the current plot metric', () => {
+        state.plotKey = 'dropChance';
+        expect(isDropsObjective()).toBe(true);
+        state.plotKey = 'killsPerSecond';
+        expect(isDropsObjective()).toBe(false);
     });
 });
 

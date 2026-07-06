@@ -4,6 +4,7 @@
  * (`optimizer.ts`) depends only on the interfaces in `types.ts`.
  */
 import { Global } from 'src/app/global';
+import { Drops } from 'src/app/drops';
 import { SettingsController, Settings, AgilitySettings } from 'src/app/settings-controller';
 import { SimulationData } from 'src/app/simulation';
 import { PlotKey } from 'src/app/stores/plotter.store';
@@ -75,19 +76,43 @@ const MINIMIZE_KEYS = new Set<PlotKey>([
 
 /**
  * Metrics that come back `NaN` from the worker and are only filled in by `Drops.update()`
- * against the full result set. Not supported as an auto-optimize objective in P1 — the UI
- * should reject them up front. See `docs/auto-optimize-design.md` §8.
+ * against the full result set. Not supported as an auto-optimize objective — the UI should reject
+ * them up front. See `docs/auto-optimize-design.md` §8/§9.
+ *
+ * `Drops` was removed here (R4): the Drops metric IS computable per simulation result in isolation
+ * (see {@link fillDropChance} — `Drops.getMonsterDropChance` reads only one result's `killTimeS`
+ * plus declared loot data and the plotter store's `selectedDrop`), so the scorer fills `dropChance`
+ * before reading the bar value, matching the Simulate chart's number exactly. It is supported for
+ * single-monster and slayer-task targets only; dungeon/stronghold/abyss-depth aggregates compute
+ * drops off a reward table rather than the per-monster average, so they're rejected up front (see
+ * {@link isSupportedObjective}).
  */
-export const UNSUPPORTED_KEYS = new Set<PlotKey>([
-    PlotKey.GP,
-    PlotKey.Drops,
-    PlotKey.Signet,
-    PlotKey.Pet,
-    PlotKey.Mark
-]);
+export const UNSUPPORTED_KEYS = new Set<PlotKey>([PlotKey.GP, PlotKey.Signet, PlotKey.Pet, PlotKey.Mark]);
 
-export function isSupportedObjective(): boolean {
-    return !UNSUPPORTED_KEYS.has(Global.stores.plotter.plotType.key);
+/**
+ * Whether the current plot metric can be optimized. `target` is optional: when omitted the check is
+ * metric-only (used for the pre-target readout). The Drops metric is additionally rejected for
+ * dungeon/stronghold/abyss-depth aggregate targets, because the Simulate chart derives an aggregate
+ * area's drop rate from its reward table (`Drops.getDungeonDropChance` etc.), NOT by averaging the
+ * per-monster drop chances the optimizer's aggregate path folds — so folding drops through that path
+ * would silently disagree with the chart. Slayer-task aggregates DO match (the chart averages their
+ * per-monster drop chances via `getMonsterListAverageDropRate`), so they stay supported.
+ */
+export function isSupportedObjective(target?: OptimizeTarget | undefined): boolean {
+    const key = Global.stores.plotter.plotType.key;
+    if (UNSUPPORTED_KEYS.has(key)) {
+        return false;
+    }
+    if (key === PlotKey.Drops && dungeonTargetId(target)) {
+        return false;
+    }
+    return true;
+}
+
+/** Whether the current plot objective is the Drops metric. Lets the UI phrase its rejection message
+ *  for a Drops+aggregate target without importing PlotKey. */
+export function isDropsObjective(): boolean {
+    return Global.stores.plotter.plotType.key === PlotKey.Drops;
 }
 
 /**
@@ -611,7 +636,30 @@ export class GameScorer implements Scorer {
             }
         }
 
+        this.fillDropChance(monsterId, datas);
+
         return datas;
+    }
+
+    /**
+     * The Drops metric (`PlotKey.Drops` => `data.dropChance`) comes back unset from the worker — it's
+     * an app-side derived value the Simulate chart fills via `Drops.update()` after every sim. When
+     * Drops is the objective, fill each per-batch result's `dropChance` here with the SAME per-result
+     * function the chart's single-monster Drops bar uses (`Drops.getMonsterDropChance`, which reads
+     * only this result's `killTimeS` plus declared loot data and the plotter store's `selectedDrop`),
+     * so `getBarValue` and the aggregate averager then read a chart-identical number off it. No-op for
+     * every other objective, so all existing paths are byte-identical. (Drops is unsupported for
+     * dungeon/stronghold/depth aggregates — see {@link isSupportedObjective} — so this only ever runs
+     * for single-monster and slayer-task per-monster sims, exactly the cases the chart derives the
+     * same way.)
+     */
+    private fillDropChance(monsterId: string, datas: SimulationData[]): void {
+        if (Global.stores.plotter.plotType.key !== PlotKey.Drops) {
+            return;
+        }
+        for (const data of datas) {
+            data.dropChance = Drops.getMonsterDropChance(monsterId, data) as number;
+        }
     }
 
     /**
