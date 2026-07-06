@@ -30,7 +30,8 @@ export abstract class Main {
                     data.trials,
                     data.maxTicks,
                     data.deathAbortThreshold,
-                    data.batches
+                    data.batches,
+                    data.rngSeed
                 );
 
                 return { monsterId: data.monsterId, entityId: data.entityId, onTask: data.onTask, result, batchResults, time: performance.now() - start };
@@ -42,7 +43,8 @@ export abstract class Main {
                 data.entityId,
                 data.trials,
                 data.maxTicks,
-                data.deathAbortThreshold
+                data.deathAbortThreshold,
+                data.rngSeed
             );
 
             return { monsterId: data.monsterId, entityId: data.entityId, onTask: data.onTask, result, time: performance.now() - start };

@@ -121,7 +121,8 @@ class HarnessCandidateProvider implements CandidateProvider {
         entityId: string | undefined,
         trials: number,
         maxTicks: number,
-        deathAbortThreshold?: number
+        deathAbortThreshold?: number,
+        rngSeed?: number
     ) {
         return (Global as any).simulator.simulateMonster(
             saveString,
@@ -129,7 +130,8 @@ class HarnessCandidateProvider implements CandidateProvider {
             entityId,
             trials,
             maxTicks,
-            deathAbortThreshold
+            deathAbortThreshold,
+            rngSeed
         );
     },
     /**

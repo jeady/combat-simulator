@@ -22,6 +22,16 @@ export interface SimulateRequest {
      */
     deathAbortThreshold?: number;
     /**
+     * Seed for common random numbers (CRN) — roadmap R3. When set, the worker installs a seeded
+     * `mulberry32` PRNG as the global `Math.random` around the trial loop (re-seeded per batch as
+     * `mixSeed(rngSeed, batchIndex)`) so the same seed reproduces the same combat rolls, and restores
+     * the real `Math.random` in a `finally`. This lets the optimizer sim candidate A and incumbent B
+     * on aligned random streams so the variance of their difference collapses (see
+     * `docs/auto-optimize-crn.md`). Omitted/undefined => the worker never touches `Math.random`, so
+     * the normal Simulate page is byte-identical to before (like `deathAbortThreshold`'s Infinity).
+     */
+    rngSeed?: number;
+    /**
      * Split `trials` into this many independent sub-runs within a SINGLE worker call, returning one
      * {@link SimulateResponse.batchResults} entry per sub-run. The optimizer uses these batch means
      * to estimate the metric's standard error for its significance gate — the same thing the app-side
