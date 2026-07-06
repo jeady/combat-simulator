@@ -380,7 +380,9 @@ export class AutoOptimizePage extends HTMLElement {
             ${
                 supported
                     ? ''
-                    : `<div class="mcs-auto-optimize-warn">This metric isn't supported by auto-optimize yet. Pick e.g. Kills, an XP type, Death Rate, or Kill Time on the Simulate page.</div>`
+                    : isDropsObjective()
+                      ? `<div class="mcs-auto-optimize-warn">Drops can't be auto-optimized for a dungeon/stronghold/depth aggregate (its drop rate comes from the area's reward table, not the per-monster average). Pick a single monster or a slayer task.</div>`
+                      : `<div class="mcs-auto-optimize-warn">This metric isn't supported by auto-optimize yet. Pick e.g. Kills, an XP type, Death Rate, or Kill Time on the Simulate page.</div>`
             }
             ${
                 target && !targetSupported
