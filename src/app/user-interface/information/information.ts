@@ -239,6 +239,12 @@ export class Information extends HTMLElement {
     public _update() {
         const information = this._getData();
 
+        console.log(
+            `[MCS-DEBUG] Information._update data=${information ? `'${information.title}'` : 'undefined'} ` +
+                `isBarSelected=${Global.stores.plotter.state.isBarSelected} selectedBar=${Global.stores.plotter.state.selectedBar} ` +
+                `isInspecting=${Global.stores.plotter.state.isInspecting} instance=${this.className}`
+        );
+
         if (information) {
             this._title.textContent = information.title;
             this._monsterInformation.classList.add('is-open');
@@ -400,7 +406,10 @@ export class Information extends HTMLElement {
                 Global.stores.plotter.state.selectedDrop === Drops.noneItem
                     ? 'Drops'
                     : Global.game.items.getObjectByID(Global.stores.plotter.state.selectedDrop).name;
+
+            console.log(`[MCS-DEBUG] Information._update render complete for '${information.title}'`);
         } else {
+            console.log('[MCS-DEBUG] Information._update reset panel (no selection)');
             this._title.textContent = 'Information';
             this._monsterInformation.classList.remove('is-open');
         }

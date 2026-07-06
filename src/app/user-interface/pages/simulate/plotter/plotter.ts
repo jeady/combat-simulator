@@ -193,6 +193,10 @@ export class Plotter extends HTMLElement {
             Global.stores.plotter.state.selectedBar !== undefined &&
             this.isFiltered(Global.stores.plotter.state.selectedBar)
         ) {
+            console.log(
+                `[MCS-DEBUG] _applyVisibility clearing selection: bar=${Global.stores.plotter.state.selectedBar} ` +
+                    `id=${Global.stores.plotter.state.bars.monsterIds[Global.stores.plotter.state.selectedBar]} is hidden`
+            );
             this._toggleHighlight(Global.stores.plotter.state.selectedBar, false);
             Global.stores.plotter.set({ isBarSelected: false, selectedBar: undefined });
 
@@ -361,7 +365,18 @@ export class Plotter extends HTMLElement {
     }
 
     public _selectTarget(current: number) {
-        if (current !== -1 && Global.stores.plotter.state.selectedBar !== current) {
+        if (current === -1) {
+            return;
+        }
+
+        // Explicitly choosing a target implies it should be enabled: the chart only shows enabled
+        // targets, so a hidden selection would immediately be cleared by the visibility pass.
+        if (!Global.stores.plotter.state.isInspecting && this.isFiltered(current)) {
+            console.log(`[MCS-DEBUG] _selectTarget enabling hidden target ${current}`);
+            this._toggleEntity(current);
+        }
+
+        if (Global.stores.plotter.state.selectedBar !== current) {
             this._selectBar(current);
 
             const bar = this._elements.bars[current];
@@ -411,45 +426,36 @@ export class Plotter extends HTMLElement {
             );
         }
 
-        // already selected
-        if (Global.stores.plotter.state.isBarSelected && Global.stores.plotter.state.selectedBar === index) {
-            return;
-        }
-
         // not found
         if (index === -1) {
             Notify.message('Could not locate a target to select', 'danger');
             return;
         }
 
-        if (this._elements.bars[index]) {
-            this._elements.bars[index].click();
+        console.log(
+            `[MCS-DEBUG] _selectActiveTarget index=${index} id=${Global.stores.plotter.state.bars.monsterIds[index]} ` +
+                `filtered=${this.isFiltered(index)} selected=${Global.stores.plotter.state.selectedBar}`
+        );
 
-            if (Global.stores.plotter.barIsStronghold(index)) {
-                if (!Global.simulation.strongholdSimFilter[Global.stores.plotter.state.bars.monsterIds[index]]) {
-                    this._toggleEntity(index);
-                }
-            } else if (Global.stores.plotter.barIsDepth(index)) {
-                if (!Global.simulation.depthSimFilter[Global.stores.plotter.state.bars.monsterIds[index]]) {
-                    this._toggleEntity(index);
-                }
-            } else if (Global.stores.plotter.barIsDungeon(index)) {
-                if (!Global.simulation.dungeonSimFilter[Global.stores.plotter.state.bars.monsterIds[index]]) {
-                    this._toggleEntity(index);
-                }
-            } else if (Global.stores.plotter.barIsTask(index)) {
-                const taskID = Global.stores.plotter.state.bars.monsterIds[index];
-
-                if (!Global.simulation.slayerSimFilter[taskID]) {
-                    this._toggleEntity(index);
-                }
-            } else if (!Global.simulation.monsterSimFilter[Global.stores.plotter.state.bars.monsterIds[index]]) {
-                this._toggleEntity(index);
-            }
+        // Enable the target if it is hidden — even when it is already selected, so a selection made
+        // before the target was enabled still surfaces its bar.
+        if (this.isFiltered(index)) {
+            this._toggleEntity(index);
         }
+
+        // already selected — nothing further to do (clicking the bar again would deselect it)
+        if (Global.stores.plotter.state.isBarSelected && Global.stores.plotter.state.selectedBar === index) {
+            return;
+        }
+
+        this._elements.bars[index]?.click();
     }
 
     public _selectBar(index: number) {
+        console.log(
+            `[MCS-DEBUG] _selectBar index=${index} id=${Global.stores.plotter.state.bars.monsterIds[index]} ` +
+                `prevSelected=${Global.stores.plotter.state.selectedBar}`
+        );
         if (Global.stores.plotter.state.selectedBar !== undefined) {
             if (Global.stores.plotter.state.selectedBar === index) {
                 // deselect if they selected the same bar
@@ -479,6 +485,11 @@ export class Plotter extends HTMLElement {
 
         this._information._update();
         this._loot._update();
+
+        console.log(
+            `[MCS-DEBUG] _selectBar done isBarSelected=${Global.stores.plotter.state.isBarSelected} ` +
+                `selectedBar=${Global.stores.plotter.state.selectedBar} information=${!!this._information}`
+        );
     }
 
     public _viewEntity(entityId: string) {
