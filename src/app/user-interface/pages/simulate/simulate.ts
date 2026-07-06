@@ -48,6 +48,12 @@ export class SimulatePage extends HTMLElement {
             'mcs-target-selection',
             'mcs-target-selection'
         );
+        // The panel sits BELOW the plotter in the template, so when the plotter's connectedCallback
+        // fires (during our content append) and calls back into _refreshTargetSelection, the panel
+        // element would not be upgraded yet and its methods would not exist — upgrade it eagerly.
+        // Without this the resulting throw aborts the rest of our connectedCallback, leaving the
+        // whole page half-initialized (dead dropdowns, info panel and queue callbacks).
+        customElements.upgrade(this._targetSelection);
 
         this._skill = getElementFromFragment(this._content, 'mcs-skill', 'mcs-dropdown');
         this._plotType = getElementFromFragment(this._content, 'mcs-plot-type', 'mcs-dropdown');
