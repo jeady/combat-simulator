@@ -1259,6 +1259,7 @@ export class Simulation {
             const response: SimulateResponse = {
                 monsterId: request.monsterId,
                 entityId: request.entityId,
+                onTask: request.onTask,
                 time: 0,
                 result: { simSuccess: false, reason: error?.message ?? 'An error was thrown during simulation.' }
             };

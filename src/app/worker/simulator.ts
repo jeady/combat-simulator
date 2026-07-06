@@ -40,6 +40,9 @@ export class Simulator {
             data: {
                 monsterId: request.monsterId,
                 entityId: request.entityId,
+                // Must be forwarded: the worker echoes it and the app keys the stored result by it
+                // (plain vs task@ variant). Dropping it stores on-task results under the plain key.
+                onTask: request.onTask,
                 saveString: request.saveString,
                 trials: request.trials,
                 maxTicks: request.maxTicks,
