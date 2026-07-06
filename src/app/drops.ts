@@ -1196,7 +1196,16 @@ export abstract class Drops {
         }
     }
 
-    private static getMonsterDropChance(monsterId: string, data: SimulationData) {
+    /**
+     * Per-second drop rate for a SINGLE monster's simulated result, computed from that one
+     * {@link SimulationData} (its `killTimeS`) plus declared game data (the monster's loot table) and
+     * plotter-store state (`selectedDrop`, loot-doubling modifiers). It reads NOTHING from the full
+     * result set, so it's computable per simulation in isolation — which is exactly why the
+     * auto-optimizer can call it to fill `data.dropChance` before reading the Drops metric off a
+     * per-batch result. Made public (was private) for that reuse; the chart's single-monster Drops
+     * bar goes through this same method, so exposing it changes no behavior.
+     */
+    public static getMonsterDropChance(monsterId: string, data: SimulationData) {
         if (!data) {
             return;
         }
