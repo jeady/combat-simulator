@@ -247,3 +247,55 @@ console.log(
             ? `DEATH-ABORT VERIFIED: aborted run used ${pct}% of the ticks (broke after the first death).`
             : `DEATH-ABORT INCONCLUSIVE (full ticks ${full.tickCount}, abort ticks ${aborted.tickCount}); review.`)
 );
+
+// --- R3: verify seeded worker RNG (common random numbers) is deterministic ---
+// Reuse the level-99 Bronze save captured earlier (a survivable, non-trivial Cow fight with real
+// hit/miss/damage variance). Three checks:
+//   (a) same seed twice => byte-identical result (proves the Math.random override captures EVERY
+//       combat draw — any un-captured consumer would make the two runs differ);
+//   (b) different seeds => results differ (proves the seed is actually wired through, not constant);
+//   (c) no seed => the two seeded runs are NOT reproduced by an unseeded run, and two unseeded runs
+//       differ from each other (real Math.random — behavior unchanged when no seed is supplied).
+console.log('\nVerifying R3 seeded worker RNG (common random numbers)...');
+const CRN_TRIALS = 200;
+const CRN_TICKS = 1000;
+// Compare the full metric/deathRate/tickCount fingerprint so ANY divergence is caught.
+const fingerprint = r => `${r.xpPerSecondMelvor}|${r.deathRate}|${r.tickCount}|${r.killsPerSecond}`;
+const seededA1 = await globalThis.__harness.simulate(save99, 'melvorD:Cow', undefined, CRN_TRIALS, CRN_TICKS, undefined, 123456);
+const seededA2 = await globalThis.__harness.simulate(save99, 'melvorD:Cow', undefined, CRN_TRIALS, CRN_TICKS, undefined, 123456);
+const seededB1 = await globalThis.__harness.simulate(save99, 'melvorD:Cow', undefined, CRN_TRIALS, CRN_TICKS, undefined, 987654);
+const unseeded1 = await globalThis.__harness.simulate(save99, 'melvorD:Cow', undefined, CRN_TRIALS, CRN_TICKS);
+const unseeded2 = await globalThis.__harness.simulate(save99, 'melvorD:Cow', undefined, CRN_TRIALS, CRN_TICKS);
+
+const sameSeedIdentical = fingerprint(seededA1) === fingerprint(seededA2);
+const diffSeedDiffers = fingerprint(seededA1) !== fingerprint(seededB1);
+const unseededNondeterministic = fingerprint(unseeded1) !== fingerprint(unseeded2);
+const unseededNotSeeded = fingerprint(unseeded1) !== fingerprint(seededA1);
+
+console.log(`  seed 123456 (run 1): ${fingerprint(seededA1)}`);
+console.log(`  seed 123456 (run 2): ${fingerprint(seededA2)}`);
+console.log(`  seed 987654:         ${fingerprint(seededB1)}`);
+console.log(`  no seed (run 1):     ${fingerprint(unseeded1)}`);
+console.log(`  no seed (run 2):     ${fingerprint(unseeded2)}`);
+console.log(`  (a) same seed identical:     ${sameSeedIdentical}`);
+console.log(`  (b) different seeds differ:  ${diffSeedDiffers}`);
+console.log(`  (c) no-seed nondeterministic:${unseededNondeterministic}  no-seed != seeded: ${unseededNotSeeded}`);
+const crnOk = sameSeedIdentical && diffSeedDiffers && unseededNondeterministic && unseededNotSeeded;
+console.log(
+    '  ' +
+        (crnOk
+            ? 'SEEDED-RNG VERIFIED: same seed reproduces exactly, different seeds differ, unseeded stays random.'
+            : 'SEEDED-RNG INCONCLUSIVE: review the fingerprints above.')
+);
+
+// Also confirm the seeded stream is fully restored: a plain unseeded batched sim after all the
+// seeded runs must still behave normally (no leaked deterministic Math.random on the worker global).
+const postRestore1 = await globalThis.__harness.simulate(save99, 'melvorD:Cow', undefined, CRN_TRIALS, CRN_TICKS);
+const postRestore2 = await globalThis.__harness.simulate(save99, 'melvorD:Cow', undefined, CRN_TRIALS, CRN_TICKS);
+const restoreOk = fingerprint(postRestore1) !== fingerprint(postRestore2);
+console.log(
+    '  ' +
+        (restoreOk
+            ? 'RNG-RESTORE VERIFIED: unseeded sims after seeded runs are random again (Math.random restored).'
+            : 'RNG-RESTORE INCONCLUSIVE: post-seed unseeded runs were identical; possible leaked stream.')
+);

@@ -44,6 +44,7 @@ export class Simulator {
                 trials: request.trials,
                 maxTicks: request.maxTicks,
                 deathAbortThreshold: request.deathAbortThreshold,
+                rngSeed: request.rngSeed,
                 batches: request.batches
             }
         });
