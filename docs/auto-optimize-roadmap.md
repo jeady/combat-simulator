@@ -11,16 +11,6 @@ Status date: 2026-07-05, branch `auto-optimize`.
 
 ## Recommended work
 
-### R1. Wall-clock / evaluation budget — HIGH value, LOW effort
-
-The run currently bounds itself only by `maxPasses` × candidate counts; on a large pool
-("all items", restarts 3+) that can be a long, unpredictable commitment, and the only
-escape is Cancel. Add a `budget` to `OptimizeOptions` (seconds and/or max evaluations),
-checked in the optimizer loop exactly where the cancel token is checked; on expiry, stop
-cleanly and return the best-so-far with `status: 'aborted'` (the result path already
-handles cancelled-with-partial-result, so the UI work is one status label). Expose as an
-optional "Time limit" field on the panel.
-
 ### R2. Generalize death-risk attribution into full change attribution — HIGH value, LOW effort
 
 `_analyzeRisk` already implements leave-one-out attribution (re-sim the winner with each
@@ -63,12 +53,6 @@ work is a focused audit + regression tests proving each coupling (weapon→style
 weapon→spell/curse/aurora, summon-pair validity) self-corrects within a pass, fixing
 anything that doesn't.
 
-### R6. Presets (Fast / Balanced / Thorough) — LOW value, LOW effort
-
-The knob set has grown (trials, fast search, restarts, pool, attack type, progression,
-pre-rank). Three presets that set them as a group, with the existing controls as the
-"advanced" tier, would help new users; defaults are already sensible so this is polish.
-
 ### R7. In-game verification backlog
 
 Human-only checks still outstanding from the remediation and post-checklist fixes:
@@ -96,6 +80,10 @@ Human-only checks still outstanding from the remediation and post-checklist fixe
 
 ## Considered and dropped (do not revive without new evidence)
 
+- **Wall-clock / evaluation budget** (was R1) and **presets** (was R6) — explicitly
+  declined by the maintainer (2026-07-05): Cancel already returns the best-so-far, and the
+  knob set is manageable without preset bundles. R-numbers are not reused, so existing
+  references stay valid.
 - **Genetic algorithm.** Multi-start restarts + the compound (declared-synergy) dimension
   cover the motivating failure modes with far fewer evaluations and far less machinery.
 - **Candidate ordering within a dimension** (sim strongest-first to strengthen the
